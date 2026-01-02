@@ -1,5 +1,5 @@
 """
-Обертка для работы с Opinion API.
+Обертка для работы с PredictDotFun API.
 Функции для получения данных из API с правильной обработкой ответов.
 
 СТРУКТУРА ОБЪЕКТА ОРДЕРА:
@@ -93,7 +93,7 @@ async def get_my_orders(
     Получает ордеры пользователя из API (асинхронная версия).
     
     Args:
-        client: Клиент Opinion SDK
+        client: Клиент PredictDotFun SDK
         market_id: ID рынка для фильтрации (по умолчанию 0 = все рынки)
         status: Фильтр по статусу ордера (строка с числовым кодом статуса):
             - ORDER_STATUS_PENDING ("1") → Pending (открытый/активный ордер, status_enum='Pending', соответствует 'pending')
@@ -167,7 +167,7 @@ async def get_order_by_id(client, order_id: str) -> Optional[Any]:
     Получает ордер по его ID из API (асинхронная версия).
     
     Args:
-        client: Клиент Opinion SDK
+        client: Клиент PredictDotFun SDK
         order_id: ID ордера (строка)
     
     Returns:

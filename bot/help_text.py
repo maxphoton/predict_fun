@@ -16,7 +16,7 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 ⚠️ <b>Важно:</b> Все три параметра должны относиться к одному кошельку. API ключ от другого кошелька не позволит размещать ордера.
 
 <b>📊 Размещение ордера (/make_market):</b>
-1. Введите ссылку на маркет Opinion.trade
+1. Введите ссылку на маркет predict.fun
 2. Если маркет категориальный — выберите подмаркет
 3. Введите сумму в USDT (например: 10)
 4. Выберите сторону: ✅ YES или ❌ NO
@@ -64,7 +64,7 @@ When registering, it's important to specify:
 ⚠️ <b>Important:</b> All three parameters must belong to the same wallet. An API key from another wallet will not allow placing orders.
 
 <b>📊 Placing an Order (/make_market):</b>
-1. Enter the Opinion.trade market link
+1. Enter the predict.fun market link
 2. If the market is categorical — select a submarket
 3. Enter the amount in USDT (e.g., 10)
 4. Select side: ✅ YES or ❌ NO

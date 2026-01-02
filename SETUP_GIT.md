@@ -44,9 +44,14 @@ git commit -m "Initial commit"
 - Скопируйте URL репозитория (например: `https://github.com/username/predict_fun.git`)
 
 ### 6. Добавление remote и push
+
+**⚠️ ВАЖНО: Используйте SSH, а не HTTPS!**
+
+Если вы используете разные GitHub аккаунты для разных проектов, **обязательно используйте SSH**, чтобы избежать проблем с аутентификацией.
+
 ```bash
-# Добавить remote (замените URL на ваш)
-git remote add origin https://github.com/username/predict_fun.git
+# Добавить remote через SSH (рекомендуется)
+git remote add origin git@github.com:maxphoton/predict_fun.git
 
 # Переименовать ветку в main (если нужно)
 git branch -M main
@@ -55,11 +60,23 @@ git branch -M main
 git push -u origin main
 ```
 
-## Альтернатива: Если используете SSH
+**Если уже добавили remote через HTTPS, измените его на SSH:**
 ```bash
-git remote add origin git@github.com:username/predict_fun.git
-git branch -M main
-git push -u origin main
+# Проверить текущий remote
+git remote -v
+
+# Изменить URL на SSH
+git remote set-url origin git@github.com:maxphoton/predict_fun.git
+
+# Проверить, что изменилось
+git remote -v
+```
+
+**Проверка SSH подключения:**
+```bash
+# Проверить, что SSH ключ настроен для правильного пользователя
+ssh -T git@github.com
+# Должно показать: "Hi maxphoton! You've successfully authenticated..."
 ```
 
 ## Важные примечания
@@ -78,4 +95,21 @@ git push -u origin main
 ```
 
 **НЕ нужно создавать отдельный git конфиг вручную** - стандартный `.git/config` будет автоматически создан при инициализации репозитория и настройке пользователя.
+
+### Аутентификация через SSH vs HTTPS
+
+**Проблема:** При использовании HTTPS (`https://github.com/...`) git использует глобальные credentials, что может вызвать ошибку 403 если репозиторий принадлежит другому пользователю.
+
+**Решение:** Используйте SSH (`git@github.com:...`) - он автоматически использует правильный SSH ключ для аутентификации.
+
+**Ошибка при push через HTTPS:**
+```
+remote: Permission to maxphoton/predict_fun.git denied to egorprh.
+fatal: unable to access 'https://github.com/...': The requested URL returned error: 403
+```
+
+**Решение:** Измените remote URL на SSH:
+```bash
+git remote set-url origin git@github.com:maxphoton/predict_fun.git
+```
 

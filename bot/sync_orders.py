@@ -142,7 +142,7 @@ def get_current_market_price(client, token_id: str, side: str) -> Optional[float
     Получает текущую цену рынка для токена.
     
     Args:
-        client: Клиент Opinion SDK
+        client: Клиент PredictDotFun SDK
         token_id: ID токена (YES или NO)
         side: BUY или SELL - определяет, какую цену брать (best_bid для BUY, best_ask для SELL)
     
@@ -457,7 +457,7 @@ def cancel_orders_batch(client, order_ids: List[str]) -> List[Dict]:
     Отменяет ордера батчем.
     
     Args:
-        client: Клиент Opinion SDK
+        client: Клиент PredictDotFun SDK
         order_ids: Список ID ордеров для отмены
     
     Returns:
@@ -504,7 +504,7 @@ def place_orders_batch(client, orders_params: List[Dict]) -> List:
     Размещает ордера батчем.
     
     Args:
-        client: Клиент Opinion SDK
+        client: Клиент PredictDotFun SDK
         orders_params: Список параметров ордеров
     
     Returns:

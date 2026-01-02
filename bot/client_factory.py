@@ -1,5 +1,5 @@
 """
-Фабрика для создания клиентов Opinion SDK.
+Фабрика для создания клиентов PredictDotFun SDK.
 """
 import logging
 import os
@@ -103,7 +103,7 @@ def setup_proxy():
 
 def create_client(user_data: dict) -> Client:
     """
-    Создает клиент Opinion SDK из данных пользователя.
+    Создает клиент PredictDotFun SDK из данных пользователя.
     Настраивает прокси в конфигурации SDK для всех API запросов.
     
     Важно: SDK использует urllib3, который НЕ использует переменные окружения
@@ -114,7 +114,7 @@ def create_client(user_data: dict) -> Client:
         user_data: Словарь с данными пользователя (wallet_address, private_key, api_key)
     
     Returns:
-        Client: Настроенный клиент Opinion SDK
+        Client: Настроенный клиент PredictDotFun SDK
     """
     # Создаем клиент
     client = Client(

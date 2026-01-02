@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # Формат: host:port:username:password (например: 91.216.186.156:8000:Ym81H9:ysZcvQ)
     proxy: Optional[str] = None
     
-    # Опциональные параметры для Opinion SDK
+    # Опциональные параметры для PredictDotFun SDK
     conditional_token_addr: str = "0xAD1a38cEc043e70E83a3eC30443dB285ED10D774"
     multisend_addr: str = "0x998739BFdAAdde7C933B942a68053933098f9EDa"
     
@@ -31,5 +31,5 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Константы для работы с рынками
-TICK_SIZE = 0.001  # Размер тика для цен на Opinion.trade
+TICK_SIZE = 0.001  # Размер тика для цен на predict.fun
 

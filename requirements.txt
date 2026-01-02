@@ -3,7 +3,7 @@ aiogram-dialog==2.4.0
 pydantic==2.12.5
 pydantic-settings==2.12.0
 cryptography==46.0.3
-opinion-clob-sdk==0.4.3
+predict-sdk==0.0.6
 python-dotenv==1.2.1
 aiosqlite==0.22.0
 pytest==9.0.2

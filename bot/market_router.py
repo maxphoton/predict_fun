@@ -50,7 +50,7 @@ class MarketOrderStates(StatesGroup):
 # ============================================================================
 
 def parse_market_url(url: str) -> Tuple[Optional[int], Optional[str]]:
-    """Parses Opinion.trade URL and extracts marketId and market type."""
+    """Parses predict.fun URL and extracts marketId and market type."""
     try:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
@@ -316,7 +316,7 @@ async def cmd_make_market(message: Message, state: FSMContext):
     await message.answer(
         """📊 Place a Limit Order
 
-Please enter the Opinion.trade market link:""",
+Please enter the predict.fun market link:""",
         reply_markup=builder.as_markup()
     )
     await state.set_state(MarketOrderStates.waiting_url)

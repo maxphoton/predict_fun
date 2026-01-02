@@ -178,7 +178,7 @@ Please enter a different private key:"""
     except Exception:
         pass
     
-    await message.answer("""Please enter your Opinion Labs API key, which you can obtain by completing <a href="https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true">the form</a>:
+    await message.answer("""Please enter your PredictDotFun Labs API key, which you can obtain by completing <a href="https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true">the form</a>:
 
 ⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1.""")
     await state.set_state(RegistrationStates.waiting_api_key)

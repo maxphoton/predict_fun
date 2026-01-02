@@ -97,7 +97,7 @@ class TestProcessUserOrders:
     
     @pytest.fixture
     def mock_client(self):
-        """Мок клиента Opinion SDK"""
+        """Мок клиента PredictDotFun SDK"""
         client = MagicMock()
         return client
     

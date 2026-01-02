@@ -1,6 +1,6 @@
-# Opinion.trade Market Making Bot
+# predict.fun Market Making Bot
 
-A Telegram bot for placing limit orders on [Opinion.trade](https://app.opinion.trade) prediction markets. The bot provides an intuitive interface for market making strategies with secure credential management, invite-based access control, and automatic order synchronization.
+A Telegram bot for placing limit orders on [predict.fun](https://app.opinion.trade) prediction markets. The bot provides an intuitive interface for market making strategies with secure credential management, invite-based access control, and automatic order synchronization.
 
 ## Features
 
@@ -107,9 +107,9 @@ A Telegram bot for placing limit orders on [Opinion.trade](https://app.opinion.t
 
 - Python 3.13+
 - Telegram Bot Token (from [@BotFather](https://t.me/botfather))
-- Opinion Labs API Key (obtain from [the form](https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true))
+- PredictDotFun Labs API Key (obtain from [the form](https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true))
 - BNB Chain RPC URL
-- Wallet address and private key for Opinion.trade
+- Wallet address and private key for predict.fun
 - Admin Telegram ID (for invite management)
 
 ### Installation
@@ -152,11 +152,11 @@ python main.py
 
 1. Start the bot with `/start`
 2. Enter your invite code (10-character alphanumeric code)
-3. Enter your Balance spot address from your [Opinion.trade profile](https://app.opinion.trade?code=BJea79)
+3. Enter your Balance spot address from your [predict.fun profile](https://app.opinion.trade?code=BJea79)
    - ⚠️ **Important**: Must be the wallet address for which the API key was obtained
 4. Enter your private key
    - ⚠️ **Important**: Must correspond to the wallet address from step 3
-5. Enter your Opinion Labs API key
+5. Enter your PredictDotFun Labs API key
    - ⚠️ **Important**: Must be the API key obtained for the wallet from step 3
 
 All data is encrypted and stored securely. The bot validates:
@@ -176,7 +176,7 @@ The invite code is validated and used atomically at the end of registration only
 ### Placing Orders
 
 1. Use `/make_market` to start the order placement flow
-2. Enter a market URL from Opinion.trade (e.g., `https://app.opinion.trade/detail?topicId=155`)
+2. Enter a market URL from predict.fun (e.g., `https://app.opinion.trade/detail?topicId=155`)
 3. For categorical markets, select a submarket
 4. Review market information (spread, liquidity, best bids/asks)
 5. Enter the farming amount in USDT
@@ -226,7 +226,7 @@ bot/
 ├── config.py                # Configuration and settings management
 ├── database.py              # Async database operations (aiosqlite)
 ├── aes.py                   # AES-GCM encryption utilities
-├── client_factory.py         # Opinion SDK client creation and proxy setup
+├── client_factory.py         # PredictDotFun SDK client creation and proxy setup
 ├── spam_protection.py       # Anti-spam middleware
 ├── logger_config.py         # Logging configuration and setup
 ├── help_text.py             # Multi-language help text (English, Russian, Chinese)
@@ -234,7 +234,7 @@ bot/
 ├── market_router.py         # Market order placement flow (/make_market command)
 ├── orders_dialog.py         # Order management dialog (/orders command)
 ├── sync_orders.py           # Automatic order synchronization background task
-├── opinion_api_wrapper.py   # Opinion API wrapper functions (async)
+├── opinion_api_wrapper.py   # PredictDotFun API wrapper functions (async)
 ├── invites.py               # Invite management functions
 └── users.db                 # SQLite database (created automatically)
 ```
@@ -248,7 +248,7 @@ The bot uses a modular router-based architecture:
 - **Background Tasks**: Order synchronization runs as an independent async task
 - **Dialogs**: Complex multi-step interactions use `aiogram-dialog` for better UX
 - **Middleware**: Global anti-spam protection for all messages and callbacks
-- **API Wrapper**: Centralized async wrapper for Opinion API calls
+- **API Wrapper**: Centralized async wrapper for PredictDotFun API calls
 
 ## Security
 
@@ -317,7 +317,7 @@ The bot automatically synchronizes your orders every 60 seconds:
 - `aiogram==3.23.0` - Telegram Bot API framework
 - `aiogram-dialog==2.4.0` - Dialog system for complex interactions
 - `aiosqlite==0.22.0` - Async SQLite driver for non-blocking database operations
-- `opinion-clob-sdk==0.4.3` - Opinion.trade SDK for market interactions
+- `opinion-clob-sdk==0.4.3` - predict.fun SDK for market interactions
 - `cryptography==46.0.3` - AES-GCM encryption
 - `pydantic==2.12.5` - Settings management
 - `pydantic-settings==2.12.0` - Environment variable settings
@@ -329,7 +329,7 @@ The bot automatically synchronizes your orders every 60 seconds:
 - All database operations use `aiosqlite` for true async I/O
 - API calls are wrapped in `asyncio.to_thread()` to prevent blocking
 - Background tasks run independently without blocking the main event loop
-- Opinion API wrapper provides async interface for synchronous SDK
+- PredictDotFun API wrapper provides async interface for synchronous SDK
 
 ### Order Synchronization Algorithm
 1. Retrieves all users from the database

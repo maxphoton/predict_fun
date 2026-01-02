@@ -124,6 +124,6 @@ ssh -p $SSH_PORT $SERVER_USER@$SERVER_HOST "cd $SERVER_PATH && docker-compose lo
 ssh -p $SSH_PORT $SERVER_USER@$SERVER_HOST "cd $SERVER_PATH && docker-compose ps"
 
 # Статистика использования ресурсов
-ssh -p $SSH_PORT $SERVER_USER@$SERVER_HOST "docker stats opinion_trade_bot"
+ssh -p $SSH_PORT $SERVER_USER@$SERVER_HOST "docker stats predict_bot"
 ```
 
