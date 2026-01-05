@@ -9,7 +9,6 @@
 """
 
 import csv
-import hashlib
 import io
 import logging
 import zipfile

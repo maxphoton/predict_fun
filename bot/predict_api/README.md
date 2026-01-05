@@ -1,0 +1,388 @@
+# Predict.fun API Client
+
+Модуль для работы с новым API Predict.fun.
+
+## Структура
+
+```
+predict_api/
+├── __init__.py              # Экспорт основных классов и функций
+├── auth.py                  # Аутентификация (получение JWT токена)
+├── client.py                # PredictAPIClient - REST API клиент
+├── sdk_operations.py        # Операции через SDK (баланс, отмена ордеров, approvals)
+└── openapi-predictfun.json  # OpenAPI спецификация API
+```
+
+## Получение credentials
+
+### Важно: Требования к аккаунту
+
+**API не будет работать, если на аккаунте не было активности!**
+
+Перед использованием API необходимо:
+1. Зарегистрироваться на [predict.fun](https://predict.fun)
+2. **Совершить хотя бы одну сделку через веб-интерфейс** (купить или продать позицию)
+3. Только после этого API будет доступен для использования
+
+### Predict Account (Smart Wallet)
+
+Для работы с API используется **Predict Account** (смарт-кошелек).
+
+#### 1. Deposit Address (адрес смарт-кошелька)
+
+**Где взять:** [https://predict.fun/portfolio/](https://predict.fun/portfolio/)
+
+Это адрес вашего Predict Account, который используется как `wallet_address` при создании клиента.
+
+#### 2. Privy Wallet Private Key (приватный ключ)
+
+**Где взять:** [https://predict.fun/account/settings](https://predict.fun/account/settings)
+
+В настройках аккаунта можно экспортировать приватный ключ Privy Wallet. Этот ключ используется для подписи транзакций и сообщений.
+
+**Важно:**
+- Deposit Address и Privy Wallet - это разные адреса
+- Deposit Address - это адрес смарт-кошелька (используется как `wallet_address`)
+- Privy Wallet - это кошелек-владелец Predict Account (используется для подписи)
+- Приватный ключ Privy Wallet используется как `private_key` при создании клиента
+
+## Использование
+
+### Базовое использование
+
+```python
+from bot.predict_api import PredictAPIClient
+
+# Создание клиента
+api_client = PredictAPIClient(
+    api_key='your_api_key',           # API ключ (может быть пустым на testnet)
+    wallet_address='0x...',           # Deposit Address из https://predict.fun/portfolio/
+    private_key='0x...'                # Privy Wallet private key из https://predict.fun/account/settings
+)
+```
+
+### Работа с API
+
+#### Публичные методы (не требуют JWT)
+
+```python
+# Получить список рынков
+markets = await api_client.get_markets(
+    limit=10,
+    page=1,
+    category_slug=None
+)
+
+# Получить информацию о рынке
+market = await api_client.get_market(market_id=155)
+# Для категориальных рынков в ответе будет поле child_markets или аналогичное
+
+# Получить orderbook
+orderbook = await api_client.get_orderbook(market_id=155)
+
+# Получить статистику рынка
+stats = await api_client.get_market_stats(market_id=155)
+
+# Получить последнюю продажу
+last_sale = await api_client.get_market_last_sale(market_id=155)
+
+# Получить события совпадения ордеров
+matches, cursor = await api_client.get_order_matches(
+    first=10,                    # Количество событий
+    after=None,                  # Cursor для пагинации
+    market_id=155,               # Фильтр по ID рынка (опционально)
+    category_id=None,            # Фильтр по ID категории (опционально)
+    min_value_usdt_wei=None,     # Минимальное значение в USDT wei (опционально)
+    signer_address=None,         # Адрес подписанта (опционально)
+    is_signer_maker=None         # Фильтр по роли: True (maker), False (taker), None (оба)
+)
+
+# Получить список категорий
+categories = await api_client.get_categories()
+
+# Получить категорию по slug
+category = await api_client.get_category(slug='politics')
+```
+
+#### Приватные методы (требуют JWT токен)
+
+```python
+# Получить ордера пользователя
+orders, cursor = await api_client.get_my_orders(
+    first=10,         # Количество ордеров
+    after=None,       # Cursor для пагинации (None = первые ордера)
+    status="OPEN"     # Фильтр по статусу: "OPEN", "FILLED" или None (все статусы)
+)
+
+# Получить ордер по hash
+order = await api_client.get_order_by_id(order_hash="0x...")
+
+# Получить позиции пользователя
+positions, cursor = await api_client.get_positions(
+    first=10,         # Количество позиций
+    after=None        # Cursor для пагинации
+)
+
+# Получить информацию об аккаунте
+account = await api_client.get_account()
+
+# Установить реферальный код
+success = await api_client.set_referral(referral_code="REF123")
+```
+
+### Построение и размещение ордера
+
+**Почему нужна комбинация SDK + REST API?**
+
+API требует **уже подписанный ордер** с криптографической подписью. Это сделано для безопасности:
+
+1. 🔒 **Приватный ключ остается локально** - никогда не передается в API
+2. ✅ **Криптографическая подпись** - доказывает, что ордер создан владельцем ключа
+3. 🔗 **Проверка на блокчейне** - подпись проверяется при исполнении ордера
+4. 📝 **Правильные расчеты** - SDK правильно рассчитывает `nonce`, `salt`, `hash`, `makerAmount`, `takerAmount` и другие поля
+5. 🛡️ **Защита от подделки** - API не может создать ордер от вашего имени без вашей подписи
+
+SDK строит структуру ордера и подписывает его локально, затем вы отправляете подписанный ордер в API.
+
+Для размещения ордеров используется комбинация SDK (для построения и подписи) и REST API (для размещения):
+
+```python
+from bot.predict_api.sdk_operations import build_and_sign_limit_order
+from predict_sdk import Side
+
+# Построить и подписать ордер через SDK
+signed_order_data = await build_and_sign_limit_order(
+    order_builder=order_builder,
+    side=Side.BUY,
+    token_id="0x...",                    # onChainId из outcomes рынка
+    price_per_share_wei=500000000000000000,  # 0.5 USDT в wei
+    quantity_wei=10000000000000000000,   # 10 shares в wei
+    fee_rate_bps=100,                    # Комиссия из market.feeRateBps
+    is_neg_risk=False,
+    is_yield_bearing=False
+)
+
+# Разместить ордер через REST API
+result = await api_client.place_order(
+    order=signed_order_data['order'],
+    price_per_share=signed_order_data['pricePerShare'],
+    strategy="LIMIT",
+    slippage_bps="0"  # Для LIMIT можно "0"
+)
+```
+
+### Отмена ордеров
+
+#### ⚠️ Важно: Два типа отмены
+
+**Off-chain отмена** (`cancel_orders` через REST API):
+- Удаляет ордер из orderbook (off-chain)
+- **НЕ отменяет ордер в блокчейне**
+- Не требует газа
+- ⚠️ **Риск**: Ордер может быть исполнен, если кто-то знает его hash
+
+**On-chain отмена** (`cancel_orders_via_sdk` через SDK):
+- Отменяет ордер в блокчейне (инвалидирует его)
+- **НЕ удаляет автоматически из orderbook**
+- Требует газа
+- ✅ **Безопасно**: Ордер не может быть исполнен, даже если останется видимым в orderbook
+- ✅ **Рекомендуется**: Для большинства случаев используйте on-chain отмену
+
+**Что произойдет, если ордер отменен on-chain, но остался в orderbook?**
+- Если кто-то попытается исполнить такой ордер, транзакция **провалится** на уровне смарт-контракта
+- Ордер инвалидирован в блокчейне, исполнение невозможно
+- Но ордер все еще виден в orderbook (может вводить в заблуждение)
+
+#### Off-chain отмена (удаление из orderbook)
+
+```python
+# Отменить один или несколько ордеров из orderbook
+# ⚠️ ВНИМАНИЕ: Это НЕ отменяет ордер в блокчейне!
+result = await api_client.cancel_orders(order_ids=["...", "..."])
+# Возвращает: {'success': bool, 'removed': [...], 'noop': [...]}
+```
+
+#### On-chain отмена (через SDK) - Рекомендуется
+
+```python
+from bot.predict_api.sdk_operations import cancel_orders_via_sdk
+
+# Отменить ордера через SDK (on-chain транзакция, требует газа)
+# ✅ Рекомендуется для большинства случаев
+result = await cancel_orders_via_sdk(
+    order_builder=order_builder,
+    orders=[order1, order2],  # Список ордеров из API
+    is_neg_risk=False,
+    is_yield_bearing=False
+)
+# Ордер инвалидирован в блокчейне и не может быть исполнен
+# Может остаться видимым в orderbook, но это безопасно
+```
+
+### Работа с балансом
+
+#### Получение баланса через SDK (on-chain)
+
+```python
+from bot.predict_api.sdk_operations import get_usdt_balance
+
+# Получить баланс USDT из блокчейна
+balance_wei = await get_usdt_balance(order_builder)
+balance_usdt = balance_wei / 1e18
+```
+
+
+#### Получение позиций через API (off-chain)
+
+```python
+# Получить позиции пользователя
+positions, cursor = await api_client.get_positions(
+    first=10,         # Количество позиций
+    after=None        # Cursor для пагинации
+)
+# Возвращает список позиций и cursor для пагинации
+```
+
+### Установка approvals
+
+Перед размещением ордеров необходимо установить approvals (требует газа):
+
+```python
+from bot.predict_api.sdk_operations import set_approvals
+
+# Установить approvals (on-chain транзакции, требуют газа)
+result = await set_approvals(
+    order_builder=order_builder,
+    is_yield_bearing=False
+)
+# Возвращает: {'success': bool, 'transactions': [...]}
+```
+
+
+**Важно:**
+- Установка approvals выполняется **один раз на кошелек** (не нужно вызывать перед каждым ордером)
+- После установки approvals остаются активными и не требуют повторной установки
+- Если approvals уже установлены, повторный вызов безопасен (SDK проверит текущее состояние)
+- Требует BNB на Privy Wallet для оплаты газа
+- Может выполнить до 5 транзакций (только для тех approvals, которые еще не установлены)
+- Имеет таймаут 10 минут
+
+## Особенности
+
+### Автоматическое обновление JWT токена
+
+`PredictAPIClient` автоматически обновляет JWT токен при получении ошибки 401 (Unauthorized).
+
+### Поддержка testnet и mainnet
+
+Модуль автоматически выбирает API и RPC URL в зависимости от переменной окружения `TEST_MODE`:
+
+- `TEST_MODE=true` → использует testnet API и RPC
+- `TEST_MODE=false` → использует mainnet API и RPC
+
+Переменные окружения:
+- `API_BASE_URL` / `API_BASE_URL_TEST` - URL API
+- `RPC_URL` / `RPC_URL_TEST` - URL RPC провайдера
+
+### Predict Account
+
+Модуль поддерживает только **Predict Account** (смарт-кошельки):
+- Используется `signPredictAccountMessage` для аутентификации
+- Deposit Address используется как `wallet_address`
+- Privy Wallet private key используется как `private_key`
+
+### Off-chain vs On-chain операции
+
+**Off-chain (не требуют газа):**
+- Размещение ордеров через REST API (`place_order`)
+- Отмена ордеров из orderbook (`cancel_orders`)
+- Получение данных (markets, orderbook, orders и т.д.)
+- Подпись ордеров (`build_and_sign_limit_order`)
+
+**On-chain (требуют газа):**
+- Отмена ордеров через SDK (`cancel_orders_via_sdk`)
+- Установка approvals (`set_approvals`)
+- Получение баланса через SDK (`get_usdt_balance`)
+
+## Переменные окружения
+
+```bash
+# API ключ (может быть пустым на testnet)
+API_KEY=your_api_key
+
+# Режим тестирования
+TEST_MODE=false  # true для testnet, false для mainnet
+
+# API URLs
+API_BASE_URL=https://api.predict.fun/v1
+API_BASE_URL_TEST=https://api-testnet.predict.fun/v1
+
+# RPC URLs
+RPC_URL=https://bsc-dataseed.binance.org/
+RPC_URL_TEST=https://data-seed-prebsc-1-s1.binance.org:8545/
+```
+
+## Примеры использования
+
+### Полный пример размещения ордера
+
+```python
+import asyncio
+from bot.predict_api import PredictAPIClient
+from bot.predict_api.sdk_operations import build_and_sign_limit_order, set_approvals
+from predict_sdk import OrderBuilder, ChainId, Side, OrderBuilderOptions
+
+async def main():
+    # 1. Создать API клиент
+    api_client = PredictAPIClient(
+        api_key='',
+        wallet_address='0x...',  # Deposit Address из https://predict.fun/portfolio/
+        private_key='0x...'      # Privy Wallet key из https://predict.fun/account/settings
+    )
+    
+    # 2. Создать OrderBuilder
+    chain_id = ChainId.BNB_MAINNET  # или ChainId.BNB_TESTNET для testnet
+    order_builder = await OrderBuilder.make(
+        chain_id,
+        '0x...',  # Privy Wallet private key
+        OrderBuilderOptions(predict_account='0x...')  # Deposit Address
+    )
+    
+    # 3. Установить approvals (если еще не установлены)
+    await set_approvals(order_builder, is_yield_bearing=False)
+    
+    # 4. Получить данные рынка
+    market = await api_client.get_market(market_id=155)
+    token_id = market['outcomes'][0]['onChainId']
+    fee_rate_bps = market['feeRateBps']
+    
+    # 5. Построить и подписать ордер
+    signed_order = await build_and_sign_limit_order(
+        order_builder=order_builder,
+        side=Side.BUY,
+        token_id=token_id,
+        price_per_share_wei=500000000000000000,  # 0.5 USDT
+        quantity_wei=10000000000000000000,      # 10 shares
+        fee_rate_bps=fee_rate_bps,
+        is_neg_risk=market.get('isNegRisk', False),
+        is_yield_bearing=market.get('isYieldBearing', False)
+    )
+    
+    # 6. Разместить ордер
+    result = await api_client.place_order(
+        order=signed_order['order'],
+        price_per_share=signed_order['pricePerShare'],
+        strategy="LIMIT"
+    )
+    
+    print(f"Ордер размещен: {result}")
+
+if __name__ == '__main__':
+    asyncio.run(main())
+```
+
+## Документация
+
+- [Predict.fun API Documentation](https://dev.predict.fun/)
+- [Python SDK Documentation](https://dev.predict.fun/doc-679306)
+- [How to Authenticate](https://dev.predict.fun/py-how-to-authenticate-your-api-requests-1868364m0)
