@@ -8,7 +8,7 @@ from aiogram_dialog.widgets.kbd import Button, Group, Back, Cancel
 from aiogram_dialog.widgets.input import MessageInput
 
 from database import get_user_orders, get_user, update_order_status, get_order_by_id
-from client_factory import create_client
+from predict_api import PredictAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -220,27 +220,71 @@ async def cancel_order_input_handler(message: Message, message_input: MessageInp
         manager.dialog_data["cancel_mode"] = False
         return
     
-    # Создаем клиент
-    client = create_client(user)
+    # Создаем API клиент нового API
+    api_client = PredictAPIClient(
+        api_key=user['api_key'],
+        wallet_address=user['wallet_address'],
+        private_key=user['private_key']
+    )
     
     try:
-        # Отменяем ордер
-        result = client.cancel_order(order_id=order_id)
+        # Получаем ордер из API по hash (hash хранится в БД)
+        found_order = await api_client.get_order_by_id(order_hash=order_id)
         
-        if result.errno == 0:
-            # Обновляем статус в БД
+        if not found_order:
+            await message.answer(
+                f"❌ Order <code>{order_id}</code> not found in API. "
+                f"It may have been already cancelled or filled."
+            )
+            # Обновляем статус в БД на canceled (на случай если ордер был отменен вручную)
             await update_order_status(order_id, "canceled")
-            await message.answer(f"✅ Order <code>{order_id}</code> successfully cancelled.")
-            logger.info(f"User {telegram_id} cancelled order {order_id}")
+            manager.dialog_data["cancel_mode"] = False
+            return
+        
+        # Получаем order.id для off-chain отмены
+        order_id_for_cancel = found_order.get('id')
+        if not order_id_for_cancel:
+            await message.answer(
+                f"❌ Order <code>{order_id}</code> does not have an ID for cancellation. "
+                f"It may have been already cancelled or filled."
+            )
+            manager.dialog_data["cancel_mode"] = False
+            return
+        
+        # Отменяем ордер через REST API (off-chain отмена, не требует газа)
+        result = await api_client.cancel_orders(order_ids=[order_id_for_cancel])
+        
+        if result.get('success', False):
+            # Проверяем, был ли ордер удален
+            removed = result.get('removed', [])
+            if order_id_for_cancel in removed:
+                # Обновляем статус в БД
+                await update_order_status(order_id, "canceled")
+                await message.answer(f"✅ Order <code>{order_id}</code> successfully cancelled.")
+                logger.info(f"User {telegram_id} cancelled order {order_id}")
+            else:
+                # Ордер уже был удален/исполнен/отменен
+                noop = result.get('noop', [])
+                if order_id_for_cancel in noop:
+                    await message.answer(
+                        f"ℹ️ Order <code>{order_id}</code> was already cancelled or filled."
+                    )
+                    await update_order_status(order_id, "canceled")
+                    logger.info(f"Order {order_id} was already cancelled/filled for user {telegram_id}")
+                else:
+                    await message.answer(
+                        f"❌ Failed to cancel order <code>{order_id}</code>. "
+                        f"Order was not removed from orderbook."
+                    )
+                    logger.warning(f"Failed to cancel order {order_id} for user {telegram_id}: order not in removed or noop")
         else:
-            # Получаем текст ошибки, если доступен
-            errmsg = getattr(result, 'errmsg', 'Unknown error')
-            error_message = f"❌ Failed to cancel order <code>{order_id}</code>.\n\nError code: {result.errno}\nError message: {errmsg}"
+            error_message = f"❌ Failed to cancel order <code>{order_id}</code>."
             await message.answer(error_message)
-            logger.warning(f"Failed to cancel order {order_id} for user {telegram_id}: errno={result.errno}, errmsg={errmsg}")
+            logger.warning(f"Failed to cancel order {order_id} for user {telegram_id}: API returned success=False")
+            
     except Exception as e:
         await message.answer(f"❌ Error cancelling order <code>{order_id}</code>: {str(e)}")
-        logger.error(f"Error cancelling order {order_id} for user {telegram_id}: {e}")
+        logger.error(f"Error cancelling order {order_id} for user {telegram_id}: {e}", exc_info=True)
     
     # Отключаем режим отмены
     manager.dialog_data["cancel_mode"] = False

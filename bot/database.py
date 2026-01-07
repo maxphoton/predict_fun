@@ -452,7 +452,15 @@ async def check_wallet_address_exists(wallet_address: str) -> bool:
         async with conn.execute("SELECT wallet_address, wallet_nonce FROM users") as cursor:
             rows = await cursor.fetchall()
     
+    # Если база пустая, сразу возвращаем False
+    if not rows:
+        return False
+    
     for row in rows:
+        # Проверяем, что данные не пустые
+        if not row[0] or not row[1]:
+            continue
+            
         try:
             existing_wallet = decrypt(row[0], row[1])
             if existing_wallet == wallet_address:
@@ -478,7 +486,15 @@ async def check_private_key_exists(private_key: str) -> bool:
         async with conn.execute("SELECT private_key_cipher, private_key_nonce FROM users") as cursor:
             rows = await cursor.fetchall()
     
+    # Если база пустая, сразу возвращаем False
+    if not rows:
+        return False
+    
     for row in rows:
+        # Проверяем, что данные не пустые
+        if not row[0] or not row[1]:
+            continue
+            
         try:
             existing_private_key = decrypt(row[0], row[1])
             if existing_private_key == private_key:
@@ -504,7 +520,15 @@ async def check_api_key_exists(api_key: str) -> bool:
         async with conn.execute("SELECT api_key_cipher, api_key_nonce FROM users") as cursor:
             rows = await cursor.fetchall()
     
+    # Если база пустая, сразу возвращаем False
+    if not rows:
+        return False
+    
     for row in rows:
+        # Проверяем, что данные не пустые
+        if not row[0] or not row[1]:
+            continue
+            
         try:
             existing_api_key = decrypt(row[0], row[1])
             if existing_api_key == api_key:

@@ -56,10 +56,10 @@ os.environ['API_BASE_URL_TEST'] = 'https://api-testnet.predict.fun/v1'
 #   Можно экспортировать из настроек аккаунта на https://predict.fun/account/settings
 
 # Адрес Predict Account (deposit address) на BNB Testnet
-TEST_PREDICT_ACCOUNT_ADDRESS = os.getenv('TEST_PREDICT_ACCOUNT_ADDRESS', '0x724dF00c9FfCE43A8C476C0b849a21e2d67311D6')
+TEST_PREDICT_ACCOUNT_ADDRESS = os.getenv('TEST_PREDICT_ACCOUNT_ADDRESS', '')
 
 # Приватный ключ Privy Wallet для Predict Account
-TEST_PRIVY_WALLET_PRIVATE_KEY = os.getenv('TEST_PRIVY_WALLET_PRIVATE_KEY', 'c9b2f16ea2bd6395c3e7c015bcedb658a8fd9d5c802583daabb1787dabad6095')
+TEST_PRIVY_WALLET_PRIVATE_KEY = os.getenv('TEST_PRIVY_WALLET_PRIVATE_KEY', '')
 
 # API ключ (на testnet может быть пустым для некоторых методов)
 TEST_API_KEY = os.getenv('TEST_API_KEY', '')

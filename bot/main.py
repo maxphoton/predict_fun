@@ -33,11 +33,10 @@ from database import (
 from invites import get_unused_invites, get_invites_statistics
 from spam_protection import AntiSpamMiddleware
 from orders_dialog import orders_dialog, OrdersSG
-from client_factory import setup_proxy
-from sync_orders import async_sync_all_orders
+# from sync_orders import async_sync_all_orders
 from logger_config import setup_root_logger
 from start_router import start_router
-from market_router import market_router
+# from market_router import market_router
 from help_text import HELP_TEXT, HELP_TEXT_ENG, HELP_TEXT_CN
 
 # Загружаем переменные окружения
@@ -396,8 +395,6 @@ async def background_sync_task():
 
 async def main():
     """Главная функция запуска бота."""
-    # Настраиваем прокси для всех API запросов (если указан в настройках)
-    setup_proxy()
     
     # Инициализируем базу данных
     await init_database()
@@ -414,12 +411,12 @@ async def main():
     
     # Регистрируем роутеры
     dp.include_router(start_router)  # User registration router
-    dp.include_router(market_router)  # Market order placement router
+    # dp.include_router(market_router)  # Market order placement router
     dp.include_router(router)  # Main router (orders, get_db, etc.)
     
     # Запускаем фоновую задачу синхронизации ордеров
-    asyncio.create_task(background_sync_task())
-    logger.info("Background sync task started")
+    # asyncio.create_task(background_sync_task())
+    # logger.info("Background sync task started")
     
     # Отправляем сообщение админу при старте (если указан)
     if settings.admin_telegram_id and settings.admin_telegram_id != 0:

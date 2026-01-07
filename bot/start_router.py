@@ -3,6 +3,7 @@ Router for user registration flow (/start command).
 Handles the complete registration process from wallet address to API key.
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -14,11 +15,13 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, FSInputFile
+from predict_sdk import OrderBuilder, OrderBuilderOptions
 
 from database import get_user, save_user, check_wallet_address_exists, check_private_key_exists, check_api_key_exists
 from invites import is_invite_valid, use_invite
-from client_factory import create_client
-from opinion_api_wrapper import get_my_orders
+from predict_api import PredictAPIClient
+from predict_api.auth import get_chain_id
+from predict_api.sdk_operations import get_usdt_balance
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,8 @@ Use the /support command to contact administrator."""
 
 To register, you need an invite code.
 
+⚠️ Important: Before using the bot, you must complete at least one trade through the web interface (https://predict.fun) for the bot to work correctly.
+
 Please enter your invite code:"""
     )
     await state.set_state(RegistrationStates.waiting_invite)
@@ -103,7 +108,7 @@ Please enter a valid invite code:"""
     
     # Переходим к следующему шагу
     # Send image with caption in one message
-    photo_path = Path(__file__).parent.parent / "files" / "spot_addr.png"
+    photo_path = Path(__file__).parent.parent / "files" / "addr.png"
     
     photo = FSInputFile(str(photo_path))
     await message.answer_photo(
@@ -113,9 +118,11 @@ Please enter a valid invite code:"""
 ⚠️ Attention: All data (wallet address, private key, API key) is encrypted using a private encryption key and stored in an encrypted form.
 The data is never used in its raw form and is not shared with third parties.
 
-Please enter your Balance spot address found <a href="https://app.opinion.trade?code=BJea79">in your profile</a>:
+Please enter your wallet address (Deposit Address) from the Portfolio page:
 
-⚠️ Important: You must specify the spot address for which you received the API key."""
+<a href="https://predict.fun/portfolio/">https://predict.fun/portfolio/</a>
+
+⚠️ Important: You must specify the wallet address for which you received the API key."""
     )
     await state.set_state(RegistrationStates.waiting_wallet)
 
@@ -146,9 +153,17 @@ Please enter a different wallet address:"""
     except Exception:
         pass
     
-    await message.answer("""Please enter your private key:
+    # Send image with caption for private key
+    photo_path = Path(__file__).parent.parent / "files" / "private.png"
+    photo = FSInputFile(str(photo_path))
+    await message.answer_photo(
+        photo,
+        caption="""Please enter your private key (Privy Wallet Private Key) from the account settings page:
 
-⚠️ Important: You must specify the private key of the wallet you registered with (the same wallet address you entered above).""")
+<a href="https://predict.fun/account/settings">https://predict.fun/account/settings</a>
+
+⚠️ Important: You must specify the private key of the Privy Wallet that owns the Predict Account (the same wallet address you entered above)."""
+    )
     await state.set_state(RegistrationStates.waiting_private_key)
 
 
@@ -178,7 +193,11 @@ Please enter a different private key:"""
     except Exception:
         pass
     
-    await message.answer("""Please enter your PredictDotFun Labs API key, which you can obtain by completing <a href="https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true">the form</a>:
+    await message.answer("""Please enter your Predict.fun API key.
+
+You can get an API key by opening a ticket in Discord:
+
+<a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
 
 ⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1.""")
     await state.set_state(RegistrationStates.waiting_api_key)
@@ -214,21 +233,38 @@ Please enter a different API key:"""
     await message.answer("""🔍 Verifying connection to API...""")
     
     try:
-        # Создаем временный словарь с данными пользователя для проверки
-        test_user_data = {
-            'wallet_address': wallet_address,
-            'private_key': private_key,
-            'api_key': api_key_clean
-        }
+        # Создаем API клиент нового API
+        api_client = PredictAPIClient(
+            api_key=api_key_clean,
+            wallet_address=wallet_address,
+            private_key=private_key
+        )
         
-        # Пытаемся создать клиент
-        test_client = create_client(test_user_data)
+        # Создаем OrderBuilder для SDK операций
+        chain_id = get_chain_id()
+        order_builder = await asyncio.to_thread(
+            OrderBuilder.make,
+            chain_id,
+            private_key,
+            OrderBuilderOptions(predict_account=wallet_address)
+        )
         
-        # Пытаемся получить ордера пользователя для проверки подключения
-        orders = await get_my_orders(test_client, market_id=0, status="", limit=1, page=1)
+        # Получаем баланс USDT
+        logger.info(f"Проверка баланса USDT для пользователя {telegram_id}")
+        balance_wei = await get_usdt_balance(order_builder)
+        balance_usdt = balance_wei / 1e18
         
         # Если дошли сюда без исключений, значит подключение успешно
-        logger.info(f"Успешная проверка подключения для пользователя {telegram_id}")
+        logger.info(f"Успешная проверка подключения для пользователя {telegram_id}. Баланс USDT: {balance_usdt:.6f}")
+        
+        # Сообщаем пользователю об успешной проверке и балансе
+        await message.answer(
+            f"""✅ Connection verified successfully!
+
+Your USDT balance: {balance_usdt:.6f} USDT
+
+Approvals will be set automatically when you place your first order."""
+        )
         
     except Exception as e:
         # Генерируем код ошибки для сопоставления с логами

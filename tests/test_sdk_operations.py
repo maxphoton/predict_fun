@@ -48,11 +48,11 @@ os.environ['TEST_MODE'] = 'false'
 
 # Адрес Predict Account (deposit address)
 # Можно найти в настройках аккаунта на https://predict.fun/account/settings
-MAINNET_PREDICT_ACCOUNT_ADDRESS = os.getenv('MAINNET_PREDICT_ACCOUNT_ADDRESS', '0x724dF00c9FfCE43A8C476C0b849a21e2d67311D6')
+MAINNET_PREDICT_ACCOUNT_ADDRESS = os.getenv('MAINNET_PREDICT_ACCOUNT_ADDRESS', '')
 
 # Приватный ключ Privy Wallet для Predict Account
 # Можно экспортировать из настроек аккаунта на https://predict.fun/account/settings
-MAINNET_PRIVY_WALLET_PRIVATE_KEY = os.getenv('MAINNET_PRIVY_WALLET_PRIVATE_KEY', 'c9b2f16ea2bd6395c3e7c015bcedb658a8fd9d5c802583daabb1787dabad6095')
+MAINNET_PRIVY_WALLET_PRIVATE_KEY = os.getenv('MAINNET_PRIVY_WALLET_PRIVATE_KEY', '')
 
 # RPC URL для mainnet
 MAINNET_RPC_URL = os.getenv('RPC_URL', 'https://bsc-dataseed.binance.org/')
