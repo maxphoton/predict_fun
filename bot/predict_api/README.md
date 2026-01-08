@@ -150,13 +150,19 @@ SDK строит структуру ордера и подписывает ег�
 from bot.predict_api.sdk_operations import build_and_sign_limit_order
 from predict_sdk import Side
 
+# ⚠️ ВАЖНО: quantity_wei должно быть округлено до целого числа shares
+# Например: если amount_usdt=1.0 и price=0.804, то:
+# quantity = 1.0 / 0.804 = 1.243... shares
+# quantity_rounded = round(1.243) = 1 share
+# quantity_wei = 1 * 1e18 = 1000000000000000000
+
 # Построить и подписать ордер через SDK
 signed_order_data = await build_and_sign_limit_order(
     order_builder=order_builder,
     side=Side.BUY,
     token_id="0x...",                    # onChainId из outcomes рынка
     price_per_share_wei=500000000000000000,  # 0.5 USDT в wei
-    quantity_wei=10000000000000000000,   # 10 shares в wei
+    quantity_wei=10000000000000000000,   # 10 shares в wei (целое число!)
     fee_rate_bps=100,                    # Комиссия из market.feeRateBps
     is_neg_risk=False,
     is_yield_bearing=False
@@ -401,12 +407,16 @@ async def main():
     fee_rate_bps = market['feeRateBps']
     
     # 5. Построить и подписать ордер
+    # ⚠️ ВАЖНО: quantity_wei должно быть округлено до целого числа shares
+    # quantity = amount_usdt / price_per_share
+    # quantity_rounded = round(quantity)  # Округляем до целого
+    # quantity_wei = int(quantity_rounded * 1e18)
     signed_order = await build_and_sign_limit_order(
         order_builder=order_builder,
         side=Side.BUY,
         token_id=token_id,
         price_per_share_wei=500000000000000000,  # 0.5 USDT
-        quantity_wei=10000000000000000000,      # 10 shares
+        quantity_wei=10000000000000000000,      # 10 shares (целое число!)
         fee_rate_bps=fee_rate_bps,
         is_neg_risk=market.get('isNegRisk', False),
         is_yield_bearing=market.get('isYieldBearing', False)

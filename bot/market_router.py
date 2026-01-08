@@ -6,9 +6,7 @@ Handles the complete order placement process from URL input to order confirmatio
 import asyncio
 import hashlib
 import logging
-import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
@@ -18,13 +16,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from opinion_clob_sdk import Client
-from opinion_clob_sdk.chain.py_order_utils.model.order import PlaceOrderDataInput
-from opinion_clob_sdk.chain.py_order_utils.model.sides import OrderSide
-from opinion_clob_sdk.chain.py_order_utils.model.order_type import LIMIT_ORDER
+from predict_sdk import OrderBuilder, Side, OrderBuilderOptions
 
 from database import get_user, save_order
-from client_factory import create_client
+from predict_api import PredictAPIClient
+from predict_api.sdk_operations import build_and_sign_limit_order, get_usdt_balance
+from predict_api.auth import get_chain_id
 from config import TICK_SIZE
 
 logger = logging.getLogger(__name__)
@@ -36,7 +33,7 @@ logger = logging.getLogger(__name__)
 class MarketOrderStates(StatesGroup):
     """States for the order placement process."""
     waiting_url = State()
-    waiting_submarket = State()  # For submarket selection in categorical markets
+    waiting_submarket = State()  # For market selection from the list
     waiting_amount = State()
     waiting_side = State()
     waiting_offset_ticks = State()
@@ -49,75 +46,109 @@ class MarketOrderStates(StatesGroup):
 # Helper functions for market operations
 # ============================================================================
 
-def parse_market_url(url: str) -> Tuple[Optional[int], Optional[str]]:
-    """Parses predict.fun URL and extracts marketId and market type."""
+def parse_market_url(url: str) -> Optional[str]:
+    """
+    Parses predict.fun URL and extracts slug.
+    
+    Args:
+        url: URL вида https://predict.fun/market/metamask-fdv-above-one-day-after-launch
+    
+    Returns:
+        Slug рынка или None в случае ошибки.
+    """
     try:
         parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        
-        market_id = None
-        market_type = None
-        
-        if "topicId" in params:
-            market_id = int(params["topicId"][0])
-        
-        if "type" in params:
-            market_type = params["type"][0]
-        
-        return market_id, market_type
+        # Извлекаем slug из пути /market/{slug}
+        # Пример: https://predict.fun/market/metamask-fdv-above-one-day-after-launch
+        path = parsed.path.strip('/')
+        if path.startswith('market/'):
+            slug = path[7:]  # Убираем 'market/'
+            # Убираем слэш в конце на всякий случай
+            slug = slug.rstrip('/')
+            return slug if slug else None
+        return None
     except (ValueError, AttributeError):
-        return None, None
+        return None
 
 
-async def get_market_info(client: Client, market_id: int, is_categorical: bool = False):
-    """Gets market information."""
+async def get_market_info(api_client: PredictAPIClient, market_id: int):
+    """
+    Gets market information by market ID.
+    
+    Note: Новое API использует один метод get_market() для всех типов рынков
+    (категориальные рынки обрабатываются автоматически).
+    """
     try:
-        if is_categorical:
-            response = client.get_categorical_market(market_id=market_id)
-        else:
-            response = client.get_market(market_id=market_id, use_cache=True)
-
-        if response.errno == 0:
-            return response.result.data
-        else:
-            logger.error(f"Error getting market: {response.errmsg} (code: {response.errno})")
-            return None
+        market = await api_client.get_market(market_id=market_id)
+        return market
     except Exception as e:
         logger.error(f"Error getting market: {e}")
         return None
 
 
-def get_categorical_market_submarkets(market) -> list:
-    """Extracts list of submarkets from categorical market."""
-    if hasattr(market, 'child_markets') and market.child_markets:
-        return market.child_markets
-    return []
-
-
-async def get_orderbooks(client: Client, yes_token_id: str, no_token_id: str):
-    """Gets order books for YES and NO tokens."""
-    yes_orderbook = None
-    no_orderbook = None
+async def get_markets_by_slug(api_client: PredictAPIClient, slug: str):
+    """
+    Gets list of markets by slug using get_category endpoint.
     
+    Согласно документации: https://dev.predict.fun/get-category-by-slug-25326911e0
+    Метод get_category возвращает категорию с массивом markets.
+    Slug в URL - это slug категории, возвращаем список markets из категории.
+    
+    Args:
+        api_client: PredictAPIClient instance
+        slug: Slug категории (например, 'metamask-fdv-above-one-day-after-launch')
+    
+    Returns:
+        Tuple: (список словарей с данными markets, информация о категории) или (None, None) в случае ошибки.
+        Информация о категории: {'title': str или None, 'slug': str}
+    """
     try:
-        response = client.get_orderbook(token_id=yes_token_id)
-        if response.errno == 0:
-            yes_orderbook = response.result if hasattr(response.result, 'bids') else getattr(response.result, 'data', response.result)
+        category = await api_client.get_category(slug=slug)
+        if not category:
+            return None, None
+        
+        # Получаем список markets из категории
+        markets = category.get('markets', [])
+        if not markets:
+            return None, None
+        
+        # Извлекаем информацию о категории
+        category_info = {
+            'title': category.get('title'),
+            'slug': category.get('slug', slug)
+        }
+        
+        return markets, category_info
     except Exception as e:
-        logger.error(f"Error getting orderbook for YES: {e}")
+        logger.error(f"Error getting markets by slug {slug}: {e}")
+        return None, None
+
+
+async def get_orderbooks(api_client: PredictAPIClient, market_id: int):
+    """
+    Gets orderbook for market.
     
+    Note: Новое API возвращает один orderbook для рынка (market_id),
+    который содержит цены на основе исхода "Yes".
+    Для расчета цены "No": price_no = 1 - price_yes
+    """
     try:
-        response = client.get_orderbook(token_id=no_token_id)
-        if response.errno == 0:
-            no_orderbook = response.result if hasattr(response.result, 'bids') else getattr(response.result, 'data', response.result)
+        orderbook = await api_client.get_orderbook(market_id=market_id)
+        return orderbook
     except Exception as e:
-        logger.error(f"Error getting orderbook for NO: {e}")
+        logger.error(f"Error getting orderbook for market {market_id}: {e}")
+        return None
+
+
+def calculate_spread_and_liquidity(orderbook: dict, token_name: str, is_no_token: bool = False) -> dict:
+    """
+    Calculates spread and liquidity for a token.
     
-    return yes_orderbook, no_orderbook
-
-
-def calculate_spread_and_liquidity(orderbook, token_name: str) -> dict:
-    """Calculates spread and liquidity for a token."""
+    Args:
+        orderbook: Словарь с orderbook из нового API: {'bids': [[price, size], ...], 'asks': [[price, size], ...]}
+        token_name: Название токена ("YES" или "NO")
+        is_no_token: True если это NO токен (нужно инвертировать цены: price_no = 1 - price_yes)
+    """
     if not orderbook:
         return {
             'best_bid': None,
@@ -130,22 +161,41 @@ def calculate_spread_and_liquidity(orderbook, token_name: str) -> dict:
             'total_liquidity': 0
         }
     
-    bids = orderbook.bids if hasattr(orderbook, 'bids') else []
-    asks = orderbook.asks if hasattr(orderbook, 'asks') else []
+    # Новое API: orderbook - это словарь с массивами массивов
+    bids = orderbook.get('bids', [])  # [[price, size], ...]
+    asks = orderbook.get('asks', [])  # [[price, size], ...]
     
     # Extract best bid (highest price)
     best_bid = None
     if bids and len(bids) > 0:
-        bid_prices = [float(bid.price) for bid in bids if hasattr(bid, 'price')]
+        bid_prices = [float(bid[0]) for bid in bids]
         if bid_prices:
             best_bid = max(bid_prices)  # Highest bid
     
     # Extract best ask (lowest price)
     best_ask = None
     if asks and len(asks) > 0:
-        ask_prices = [float(ask.price) for ask in asks if hasattr(ask, 'price')]
+        ask_prices = [float(ask[0]) for ask in asks]
         if ask_prices:
             best_ask = min(ask_prices)  # Lowest ask
+    
+    # Если это NO токен, преобразуем цены из YES в NO
+    # Согласно документации: price_no = 1 - price_yes
+    # bids для YES (покупка YES) → asks для NO (продажа NO)
+    # asks для YES (продажа YES) → bids для NO (покупка NO)
+    # Поэтому: best_bid_NO = 1 - best_ask_YES, best_ask_NO = 1 - best_bid_YES
+    if is_no_token:
+        if best_bid is not None and best_ask is not None:
+            best_bid_no = 1.0 - best_ask
+            best_ask_no = 1.0 - best_bid
+            best_bid = best_bid_no
+            best_ask = best_ask_no
+        elif best_bid is not None:
+            best_ask = 1.0 - best_bid
+            best_bid = None
+        elif best_ask is not None:
+            best_bid = 1.0 - best_ask
+            best_ask = None
     
     spread = None
     spread_pct = None
@@ -156,8 +206,9 @@ def calculate_spread_and_liquidity(orderbook, token_name: str) -> dict:
         mid_price = (best_bid + best_ask) / 2
         spread_pct = (spread / mid_price * 100) if mid_price > 0 else 0
     
-    bid_liquidity = sum(float(bid.size) for bid in bids[:5]) if bids else 0
-    ask_liquidity = sum(float(ask.size) for ask in asks[:5]) if asks else 0
+    # Суммируем ликвидность из первых 5 уровней
+    bid_liquidity = sum(float(bid[1]) for bid in bids[:5]) if bids else 0
+    ask_liquidity = sum(float(ask[1]) for ask in asks[:5]) if asks else 0
     total_liquidity = bid_liquidity + ask_liquidity
     
     return {
@@ -202,41 +253,46 @@ def calculate_target_price(current_price: float, side: str, offset_ticks: int, t
     return target, is_valid
 
 
-async def check_usdt_balance(client: Client, required_amount: float) -> Tuple[bool, dict]:
-    """Checks if USDT balance is sufficient."""
-    try:
-        response = client.get_my_balances()
-        
-        if response.errno != 0:
-            return False, {}
-        
-        balance_data = response.result if not hasattr(response.result, 'data') else response.result.data
-        
-        available = 0.0
-        if hasattr(balance_data, 'balances') and balance_data.balances:
-            for balance in balance_data.balances:
-                available += float(getattr(balance, 'available_balance', 0))
-        elif hasattr(balance_data, 'available_balance'):
-            available = float(balance_data.available_balance)
-        elif hasattr(balance_data, 'available'):
-            available = float(balance_data.available)
-        
-        return available >= required_amount, balance_data
-    except Exception as e:
-        logger.error(f"Error checking balance: {e}")
-        return False, {}
-
-
-async def place_order(client: Client, order_params: dict) -> Tuple[bool, Optional[str], Optional[str]]:
+async def check_usdt_balance(order_builder: OrderBuilder, required_amount: float) -> Tuple[bool, float]:
     """
-    Places an order on the market.
+    Checks if USDT balance is sufficient.
     
     Returns:
-        Tuple[bool, Optional[str], Optional[str]]: (success, order_id, error_message)
+        Tuple[bool, float]: (has_sufficient_balance, current_balance_usdt)
     """
     try:
-        client.enable_trading()
+        balance_wei = await get_usdt_balance(order_builder)
+        balance_usdt = balance_wei / 1e18
         
+        return balance_usdt >= required_amount, balance_usdt
+    except Exception as e:
+        logger.error(f"Error checking balance: {e}")
+        return False, 0.0
+
+
+async def place_order(
+    api_client: PredictAPIClient,
+    order_builder: OrderBuilder,
+    order_params: dict
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Places an order on the market using new API (SDK + REST API).
+    
+    Args:
+        api_client: PredictAPIClient instance
+        order_builder: OrderBuilder instance for SDK operations
+        order_params: Dictionary with order parameters:
+            - 'market': dict - market data (для получения feeRateBps, isNegRisk, isYieldBearing)
+            - 'token_id': str - token ID (onChainId из outcomes)
+            - 'side': str - "BUY" or "SELL" (преобразуется в Side.BUY/SELL)
+            - 'price': float - price per share (0.001 - 0.999)
+            - 'amount': float - amount in USDT
+    
+    Returns:
+        Tuple[bool, Optional[str], Optional[str]]: (success, order_hash, error_message)
+        order_hash используется как order_id в БД
+    """
+    try:
         price = float(order_params['price'])
         price_rounded = round(price, 3)  # API requires max 3 decimal places
         
@@ -254,39 +310,86 @@ async def place_order(client: Client, order_params: dict) -> Tuple[bool, Optiona
             logger.error(error_msg)
             return False, None, error_msg
         
-        order_data = PlaceOrderDataInput(
-            marketId=order_params['market_id'],
-            tokenId=order_params['token_id'],
-            side=order_params['side'],
-            orderType=LIMIT_ORDER,
-            price=str(price_rounded),
-            makerAmountInQuoteToken=order_params['amount']
+        # Получаем данные из market
+        market = order_params.get('market', {})
+        fee_rate_bps = market.get('feeRateBps', 100)  # По умолчанию 100 bps (1%)
+        is_neg_risk = market.get('isNegRisk', False)
+        is_yield_bearing = market.get('isYieldBearing', False)
+        
+        # Преобразуем side в Side enum
+        # order_params['side'] всегда строка "BUY" или "SELL" (новое API)
+        side_str = order_params['side'].upper()
+        side = Side.BUY if side_str == "BUY" else Side.SELL
+        
+        # Преобразуем цену в wei
+        price_per_share_wei = int(price_rounded * 1e18)
+        
+        # Преобразуем amount (USDT) в quantity_wei (количество акций)
+        # quantity = amount_usdt / price_per_share
+        amount_usdt = float(order_params['amount'])
+        quantity = amount_usdt / price_rounded
+        # Округляем количество акций до целого числа
+        quantity_rounded = round(quantity)
+        quantity_wei = int(quantity_rounded * 1e18)
+        
+        # Шаг 1: Построить и подписать ордер через SDK
+        signed_order_data = await build_and_sign_limit_order(
+            order_builder=order_builder,
+            side=side,
+            token_id=order_params['token_id'],
+            price_per_share_wei=price_per_share_wei,
+            quantity_wei=quantity_wei,
+            fee_rate_bps=fee_rate_bps,
+            is_neg_risk=is_neg_risk,
+            is_yield_bearing=is_yield_bearing
         )
         
-        # Обертываем синхронный вызов API в asyncio.to_thread, чтобы не блокировать event loop
-        def _place_order_sync():
-            return client.place_order(order_data, check_approval=True)
-        
-        result = await asyncio.to_thread(_place_order_sync)
-        
-        if result.errno == 0:
-            order_id = 'N/A'
-            if hasattr(result, 'result'):
-                if hasattr(result.result, 'order_data'):
-                    order_data_obj = result.result.order_data
-                    if hasattr(order_data_obj, 'order_id'):
-                        order_id = order_data_obj.order_id
-                    elif hasattr(order_data_obj, 'id'):
-                        order_id = order_data_obj.id
-            
-            return True, str(order_id), None
-        else:
-            error_msg = result.errmsg if hasattr(result, 'errmsg') and result.errmsg else f"Error code: {result.errno}"
-            logger.error(f"Error placing order: {error_msg}")
+        if not signed_order_data:
+            error_msg = "Failed to build and sign order"
+            logger.error(error_msg)
             return False, None, error_msg
+        
+        # Шаг 2: Разместить ордер через REST API
+        # Логируем данные для отладки
+        logger.info(f"Placing order with pricePerShare={signed_order_data.get('pricePerShare')}")
+        logger.debug(f"Order data: {signed_order_data.get('order', {})}")
+        
+        result = await api_client.place_order(
+            order=signed_order_data['order'],
+            price_per_share=signed_order_data['pricePerShare'],
+            strategy="LIMIT"
+        )
+        
+        # Логируем результат
+        logger.info(f"Place order result: {result}")
+        
+        if result and result.get('code') == 'OK':
+            # Возвращаем orderHash как order_id (используется в БД)
+            # Важно: order_hash используется в orders_dialog.py для получения ордера
+            # через api_client.get_order_by_id(order_hash=order_id)
+            # orderHash должен быть доступен либо из signed_order_data (локально вычисленный),
+            # либо из result (ответ API)
+            order_hash = signed_order_data.get('hash') or result.get('orderHash')
+            if order_hash:
+                return True, order_hash, None
+            else:
+                # Если hash недоступен - это ошибка, так как orders_dialog.py требует hash
+                # Согласно документации, result должен содержать 'orderHash', но если его нет,
+                # это означает проблему с API или SDK
+                error_msg = "orderHash not found in response. Cannot save order to database."
+                logger.error(f"Error placing order: {error_msg}. Result: {result}")
+                return False, None, error_msg
+        else:
+            # Извлекаем описание ошибки из ответа API
+            # Структура: {"success":false,"error":{"description":"..."},"message":"..."}
+            error_description = result.get('error', {}).get('description') if result else None
+            error_msg = error_description or result.get('message', 'Unknown error') if result else 'No response from API'
+            logger.error(f"Error placing order: {error_msg}. Full result: {result}")
+            return False, None, error_msg
+            
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error placing order: {error_msg}")
+        logger.error(f"Error placing order: {error_msg}", exc_info=True)
         return False, None, error_msg
 
 
@@ -326,29 +429,31 @@ Please enter the predict.fun market link:""",
 async def process_market_url(message: Message, state: FSMContext):
     """Handles market URL input."""
     url = message.text.strip()
-    market_id, market_type = parse_market_url(url)
+    slug = parse_market_url(url)
     
-    if not market_id:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="✖️ Cancel", callback_data="cancel")
-        await message.answer(
-            """❌ Failed to extract Market ID from URL. Please try again:""",
-            reply_markup=builder.as_markup()
-        )
-        return
-    
-    is_categorical = market_type == "multi"
-    
-    # Get user data and create client
+    # Get user data and create API client
     user = await get_user(message.from_user.id)
     if not user:
         await message.answer("""❌ User not found. Please register with /start first.""")
         await state.clear()
         return
     
-    # Создаем клиент с обработкой ошибок
+    # Создаем API клиент и OrderBuilder с обработкой ошибок
     try:
-        client = create_client(user)
+        api_client = PredictAPIClient(
+            api_key=user['api_key'],
+            wallet_address=user['wallet_address'],
+            private_key=user['private_key']
+        )
+        
+        # Создаем OrderBuilder для SDK операций
+        chain_id = get_chain_id()
+        order_builder = await asyncio.to_thread(
+            OrderBuilder.make,
+            chain_id,
+            user['private_key'],
+            OrderBuilderOptions(predict_account=user['wallet_address'])
+        )
     except Exception as e:
         # Генерируем код ошибки для сопоставления с логами
         error_str = str(e)
@@ -369,85 +474,118 @@ Please contact administrator via /support and provide the error code above."""
     
     # Get market information
     await message.answer("""📊 Getting market information...""")
-    market = await get_market_info(client, market_id, is_categorical)
     
-    if not market:
-        await message.answer("""❌ Failed to get market information. Please check the URL.""")
-        await state.clear()
-        return
-    
-    # Show market name after successful retrieval
-    market_title = getattr(market, 'market_title', 'Unknown Market')
-    await message.answer(f"""✅ Market found: <b>{market_title}</b>""")
-    
-    # If this is a categorical market, need to select submarket
-    if is_categorical:
-        submarkets = get_categorical_market_submarkets(market)
-        
-        if not submarkets:
-            await message.answer("""❌ Failed to find submarkets in the categorical market""")
-            await state.clear()
-            return
-        
-        # Build submarket list for selection
-        submarket_list = []
-        for i, subm in enumerate(submarkets, 1):
-            submarket_id = getattr(subm, 'market_id', getattr(subm, 'id', None))
-            title = getattr(subm, 'market_title', getattr(subm, 'title', getattr(subm, 'name', f'Submarket {i}')))
-            submarket_list.append({
-                'id': submarket_id,
-                'title': title,
-                'data': subm
-            })
-        
-        # Save submarket list and client to state
-        await state.update_data(submarkets=submarket_list, client=client)
-        
-        # Create keyboard for submarket selection
+    # Получаем market по slug
+    if not slug:
         builder = InlineKeyboardBuilder()
-        for i, subm in enumerate(submarket_list, 1):
-            builder.button(text=f"{subm['title'][:30]}", callback_data=f"submarket_{i}")
         builder.button(text="✖️ Cancel", callback_data="cancel")
-        builder.adjust(1)
-        
         await message.answer(
-            f"""📋 <b>Categorical Market</b>
-
-Found submarkets: {len(submarket_list)}
-
-Select a submarket:""",
+            """❌ Failed to extract slug from URL. Please check the URL format.
+Expected format: https://predict.fun/market/{slug}""",
             reply_markup=builder.as_markup()
         )
-        await state.set_state(MarketOrderStates.waiting_submarket)
-        return
-    
-    # For regular market continue as usual
-    # Get order books
-    yes_token_id = getattr(market, 'yes_token_id', None)
-    no_token_id = getattr(market, 'no_token_id', None)
-    
-    if not yes_token_id or not no_token_id:
-        await message.answer("""❌ Failed to determine market tokens""")
         await state.clear()
         return
     
-    # Save client to state
-    await state.update_data(client=client)
+    markets, category_info = await get_markets_by_slug(api_client, slug)
     
-    # Continue processing regular market
-    await process_market_data(message, state, market, market_id, client, yes_token_id, no_token_id)
+    # Если не получилось получить markets
+    if not markets or len(markets) == 0:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✖️ Cancel", callback_data="cancel")
+        await message.answer(
+            """❌ Failed to get markets information. Please check the URL.""",
+            reply_markup=builder.as_markup()
+        )
+        await state.clear()
+        return
+    
+    # Всегда показываем список markets для выбора (даже если он один)
+    # Build market list for selection
+    market_list = []
+    for i, market in enumerate(markets, 1):
+        if isinstance(market, dict):
+            market_id = market.get('id')
+            title = market.get('title', f'Market {i}')
+            
+            # Извлекаем названия outcomes (токенов) если они есть
+            outcomes = market.get('outcomes', [])
+            outcome_names = []
+            if outcomes:
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        outcome_name = outcome.get('name')
+                        if outcome_name:
+                            outcome_names.append(outcome_name)
+                    elif isinstance(outcome, str):
+                        outcome_names.append(outcome)
+            
+            # Формируем текст для кнопки: название рынка + названия токенов
+            if outcome_names:
+                outcome_text = " / ".join(outcome_names)
+                button_text = f"{title} ({outcome_text})"
+            else:
+                button_text = title
+        else:
+            logger.warning(f"Market {i} is not a dict: {type(market)}")
+            market_id = None
+            title = f'Market {i}'
+            button_text = title
+        
+        market_list.append({
+            'id': market_id,
+            'title': title,
+            'button_text': button_text,
+            'data': market
+        })
+    
+    # Формируем название категории для сообщения
+    if category_info:
+        category_title = category_info.get('title')
+        category_display = category_title if category_title else category_info.get('slug', slug)
+    else:
+        category_display = slug
+    
+    # Save market list, API client and OrderBuilder to state
+    await state.update_data(markets=market_list, api_client=api_client, order_builder=order_builder)
+    
+    # Create keyboard for market selection
+    builder = InlineKeyboardBuilder()
+    for i, market_item in enumerate(market_list, 1):
+        # Используем button_text который включает названия токенов
+        builder.button(text=f"{market_item['button_text'][:50]}", callback_data=f"market_{i}")
+    builder.button(text="✖️ Cancel", callback_data="cancel")
+    builder.adjust(1)
+    
+    await message.answer(
+        f"""📋 <b>Select Market</b>
+
+Category: <b>{category_display}</b>
+Found markets: {len(market_list)}
+
+Select a market:""",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(MarketOrderStates.waiting_submarket)
 
 
-async def process_market_data(message: Message, state: FSMContext, market, market_id: int, 
-                              client: Client, yes_token_id: str, no_token_id: str):
+async def process_market_data(message: Message, state: FSMContext, market: dict, market_id: int, 
+                              api_client: PredictAPIClient):
     """Processes market data and continues order placement process."""
-    yes_orderbook, no_orderbook = await get_orderbooks(client, yes_token_id, no_token_id)
+    # Новое API: получаем один orderbook для рынка
+    orderbook = await get_orderbooks(api_client, market_id)
     
-    # Check if order books have orders
-    yes_has_orders = yes_orderbook and hasattr(yes_orderbook, 'bids') and hasattr(yes_orderbook, 'asks') and (len(yes_orderbook.bids) > 0 or len(yes_orderbook.asks) > 0)
-    no_has_orders = no_orderbook and hasattr(no_orderbook, 'bids') and hasattr(no_orderbook, 'asks') and (len(no_orderbook.bids) > 0 or len(no_orderbook.asks) > 0)
+    if not orderbook:
+        await message.answer("""❌ Failed to get orderbook for market""")
+        await state.clear()
+        return
     
-    if not yes_has_orders and not no_has_orders:
+    # Check if orderbook has orders
+    bids = orderbook.get('bids', [])
+    asks = orderbook.get('asks', [])
+    has_orders = (bids and len(bids) > 0) or (asks and len(asks) > 0)
+    
+    if not has_orders:
         await message.answer(
             """⚠️ <b>Market is inactive</b>
 
@@ -461,20 +599,16 @@ Possible reasons:
         return
     
     # Calculate spread and liquidity
-    yes_info = calculate_spread_and_liquidity(yes_orderbook, "YES")
-    no_info = calculate_spread_and_liquidity(no_orderbook, "NO")
+    # Для YES токена используем orderbook как есть
+    yes_info = calculate_spread_and_liquidity(orderbook, "YES", is_no_token=False)
+    # Для NO токена инвертируем цены (price_no = 1 - price_yes)
+    no_info = calculate_spread_and_liquidity(orderbook, "NO", is_no_token=True)
     
     # Save data to state
     await state.update_data(
-        market_id=market_id,
-        market=market,
-        yes_token_id=yes_token_id,
-        no_token_id=no_token_id,
-        yes_orderbook=yes_orderbook,
-        no_orderbook=no_orderbook,
+        orderbook=orderbook,
         yes_info=yes_info,
-        no_info=no_info,
-        client=client
+        no_info=no_info
     )
     
     # Format market information in new format
@@ -515,8 +649,11 @@ Possible reasons:
     # Format full message with empty line between blocks
     market_info_text = "\n\n".join(market_info_parts) if market_info_parts else ""
     
+    # Новое API: market - это словарь с полем 'title'
+    market_title = market.get('title', 'Unknown Market')
+    
     await message.answer(
-        f"""📋 Market Found: {market.market_title}
+        f"""📋 Market Found: {market_title}
 📊 Market ID: {market_id}
 
 {market_info_text}
@@ -527,59 +664,79 @@ Possible reasons:
     await state.set_state(MarketOrderStates.waiting_amount)
 
 
-@market_router.callback_query(F.data.startswith("submarket_"), MarketOrderStates.waiting_submarket)
-async def process_submarket(callback: CallbackQuery, state: FSMContext):
-    """Handles submarket selection in categorical market."""
+@market_router.callback_query(F.data.startswith("market_"), MarketOrderStates.waiting_submarket)
+async def process_market_selection(callback: CallbackQuery, state: FSMContext):
+    """Handles market selection from the list."""
     try:
-        submarket_index = int(callback.data.split("_")[1]) - 1
+        market_index = int(callback.data.split("_")[1]) - 1
         
         data = await state.get_data()
-        submarkets = data.get('submarkets', [])
+        markets = data.get('markets', [])
         
-        if submarket_index < 0 or submarket_index >= len(submarkets):
-            await callback.message.edit_text("""❌ Invalid submarket selection""")
+        if market_index < 0 or market_index >= len(markets):
+            await callback.message.edit_text("""❌ Invalid market selection""")
             await state.clear()
             await callback.answer()
             return
         
-        selected_submarket = submarkets[submarket_index]
-        submarket_id = selected_submarket['id']
+        selected_market_item = markets[market_index]
+        market_id = selected_market_item['id']
+        market = selected_market_item['data']
         
-        if not submarket_id:
-            await callback.message.edit_text("""❌ Failed to determine submarket ID""")
+        if not market_id or not market:
+            await callback.message.edit_text("""❌ Failed to determine market ID""")
             await state.clear()
             await callback.answer()
             return
         
-        # Get full information about selected submarket
-        client = data['client']
-        await callback.message.edit_text(f"""📊 Getting submarket information: {selected_submarket['title']}...""")
+        # Get API client and OrderBuilder from state
+        api_client = data.get('api_client')
+        order_builder = data.get('order_builder')
         
-        market = await get_market_info(client, submarket_id, is_categorical=False)
-        
-        if not market:
-            await callback.message.edit_text("""❌ Failed to get submarket information""")
+        if not api_client or not order_builder:
+            await callback.message.edit_text("""❌ API client not found. Please start over.""")
             await state.clear()
             await callback.answer()
             return
         
-        # Get submarket tokens
-        yes_token_id = getattr(market, 'yes_token_id', None)
-        no_token_id = getattr(market, 'no_token_id', None)
+        await callback.message.edit_text(f"""📊 Processing market: {selected_market_item['title']}...""")
+        
+        # Новое API: получаем token IDs из outcomes
+        outcomes = market.get('outcomes', [])
+        if not outcomes or len(outcomes) < 2:
+            await callback.message.edit_text("""❌ Failed to determine market tokens""")
+            await state.clear()
+            await callback.answer()
+            return
+        
+        # YES токен - первый outcome (index 0), NO токен - второй outcome (index 1)
+        yes_token = outcomes[0] if len(outcomes) > 0 else None
+        no_token = outcomes[1] if len(outcomes) > 1 else None
+        
+        yes_token_id = yes_token.get('onChainId') if yes_token else None
+        no_token_id = no_token.get('onChainId') if no_token else None
         
         if not yes_token_id or not no_token_id:
-            await callback.message.edit_text("""❌ Failed to determine submarket tokens""")
+            await callback.message.edit_text("""❌ Failed to determine market tokens""")
             await state.clear()
             await callback.answer()
             return
+        
+        # Save market data to state
+        await state.update_data(
+            market=market,
+            market_id=market_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id
+        )
         
         await callback.answer()
         
         # Continue processing as regular market
-        await process_market_data(callback.message, state, market, submarket_id, client, yes_token_id, no_token_id)
+        await process_market_data(callback.message, state, market, market_id, api_client)
     except (ValueError, IndexError, KeyError) as e:
-        logger.error(f"Error processing submarket selection: {e}")
-        await callback.message.edit_text("""❌ Error processing submarket selection""")
+        logger.error(f"Error processing market selection: {e}")
+        await callback.message.edit_text("""❌ Error processing market selection""")
         await state.clear()
         await callback.answer()
 
@@ -600,20 +757,11 @@ async def process_amount(message: Message, state: FSMContext):
             return
         
         data = await state.get_data()
-        client = data['client']
+        order_builder = data.get('order_builder')
         
-        # Check balance
-        has_balance, _ = await check_usdt_balance(client, amount)
-        
-        if not has_balance:
-            builder = InlineKeyboardBuilder()
-            builder.button(text="✖️ Cancel", callback_data="cancel")
-            await message.answer(
-                f"""❌ Insufficient USDT balance to place an order for {amount} USDT.
-
-Enter a different amount:""",
-                reply_markup=builder.as_markup()
-            )
+        if not order_builder:
+            await message.answer("""❌ OrderBuilder not found. Please start over.""")
+            await state.clear()
             return
         
         await state.update_data(amount=amount)
@@ -626,7 +774,7 @@ Enter a different amount:""",
         builder.adjust(2)
         
         await message.answer(
-            f"""✅ USDT balance is sufficient to place a BUY order for {amount} USDT
+            f"""✅ Amount: {amount} USDT
 
 📈 Select side:""",
             reply_markup=builder.as_markup()
@@ -652,12 +800,12 @@ async def process_side(callback: CallbackQuery, state: FSMContext):
         token_id = data['yes_token_id']
         token_name = "YES"
         current_price = data['yes_info']['mid_price']
-        orderbook = data.get('yes_orderbook')
+        is_no_token = False
     else:
         token_id = data['no_token_id']
         token_name = "NO"
         current_price = data['no_info']['mid_price']
-        orderbook = data.get('no_orderbook')
+        is_no_token = True
     
     if not current_price:
         await callback.message.answer("❌ Failed to determine current price for selected token")
@@ -665,49 +813,44 @@ async def process_side(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
+    orderbook = data.get('orderbook')
     if not orderbook:
         await callback.message.answer("❌ Failed to get orderbook for selected token")
         await state.clear()
         await callback.answer()
         return
     
-    # Extract bids and asks from orderbook
-    bids = orderbook.bids if hasattr(orderbook, 'bids') else []
-    asks = orderbook.asks if hasattr(orderbook, 'asks') else []
+    # Новое API: orderbook - это словарь с массивами массивов
+    bids_raw = orderbook.get('bids', [])  # [[price, size], ...]
+    asks_raw = orderbook.get('asks', [])  # [[price, size], ...]
+    
+    # Если это NO токен, инвертируем цены (price_no = 1 - price_yes)
+    if is_no_token:
+        bids = [[1.0 - float(bid[0]), float(bid[1])] for bid in bids_raw]
+        asks = [[1.0 - float(ask[0]), float(ask[1])] for ask in asks_raw]
+        # Меняем местами bids и asks для NO (так как инвертировали)
+        bids, asks = asks, bids
+    else:
+        bids = [[float(bid[0]), float(bid[1])] for bid in bids_raw]
+        asks = [[float(ask[0]), float(ask[1])] for ask in asks_raw]
     
     # Sort bids by descending price (highest first)
-    sorted_bids = []
-    if bids and len(bids) > 0:
-        for bid in bids:
-            if hasattr(bid, 'price'):
-                try:
-                    price = float(bid.price)
-                    sorted_bids.append((price, bid))
-                except (ValueError, TypeError):
-                    continue
-        sorted_bids.sort(key=lambda x: x[0], reverse=True)
+    sorted_bids = sorted(bids, key=lambda x: x[0], reverse=True) if bids else []
     
     # Sort asks by ascending price (lowest first)
-    sorted_asks = []
-    if asks and len(asks) > 0:
-        for ask in asks:
-            if hasattr(ask, 'price'):
-                try:
-                    price = float(ask.price)
-                    sorted_asks.append((price, ask))
-                except (ValueError, TypeError):
-                    continue
-        sorted_asks.sort(key=lambda x: x[0])
+    sorted_asks = sorted(asks, key=lambda x: x[0]) if asks else []
     
     # Get best 5 bids (highest prices)
     best_bids = []
-    for i, (price, bid) in enumerate(sorted_bids[:5]):
+    for i, bid_data in enumerate(sorted_bids[:5]):
+        price = bid_data[0]
         price_cents = price * 100
         best_bids.append(price_cents)
     
     # Get best 5 asks (lowest prices)
     best_asks = []
-    for i, (price, ask) in enumerate(sorted_asks[:5]):
+    for i, ask_data in enumerate(sorted_asks[:5]):
+        price = ask_data[0]
         price_cents = price * 100
         best_asks.append(price_cents)
     
@@ -930,6 +1073,27 @@ Maximum for SELL: {max_offset_sell} ticks"""
         await callback.answer()
         return
     
+    # Check USDT balance only for BUY orders (SELL doesn't require USDT)
+    if direction == "BUY":
+        order_builder = data.get('order_builder')
+        amount = data.get('amount')
+        
+        if order_builder and amount:
+            has_balance, balance_usdt = await check_usdt_balance(order_builder, amount)
+            
+            if not has_balance:
+                await callback.message.answer(
+                    f"""❌ Insufficient USDT balance to place a BUY order for {amount} USDT.
+
+Your balance: {balance_usdt:.6f} USDT
+Required: {amount} USDT
+
+Please go back and enter a smaller amount."""
+                )
+                await state.clear()
+                await callback.answer()
+                return
+    
     # Calculate target price
     target_price, is_valid = calculate_target_price(current_price, direction, offset_ticks, tick_size)
     
@@ -943,11 +1107,10 @@ Offset {offset_ticks} ticks is too large for current price {current_price:.6f}""
         await callback.answer()
         return
     
-    order_side = OrderSide.BUY if direction == "BUY" else OrderSide.SELL
-    
+    # Сохраняем direction как строку (BUY/SELL) для нового API
     await state.update_data(
         direction=direction,
-        order_side=order_side,
+        order_side=direction,  # Строка "BUY" или "SELL"
         target_price=target_price
     )
     
@@ -1040,11 +1203,14 @@ async def process_reposition_threshold(message: Message, state: FSMContext):
         target_price_str = f"{target_price_cents:.2f}".rstrip('0').rstrip('.')
         offset_cents_str = f"{offset_cents:.2f}".rstrip('0').rstrip('.')
         
+        # Новое API: market - это словарь с полем 'title'
+        market_title = market.get('title', 'Unknown Market')
+        
         confirm_text = (
             f"""📋 <b>Settings Confirmation</b>
 
 📊 <b>Market:</b>
-Name: {market.market_title}
+Name: {market_title}
 Outcome: {token_name}
 
 💰 <b>Farm settings:</b>
@@ -1086,12 +1252,20 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
         return
     
     data = await state.get_data()
-    client = data['client']
+    api_client = data.get('api_client')
+    order_builder = data.get('order_builder')
+    market = data.get('market', {})
+    
+    if not api_client or not order_builder:
+        await callback.message.edit_text("""❌ API client not found. Please start over.""")
+        await state.clear()
+        await callback.answer()
+        return
     
     order_params = {
-        'market_id': data['market_id'],
+        'market': market,  # Для получения feeRateBps, isNegRisk, isYieldBearing
         'token_id': data['token_id'],
-        'side': data['order_side'],
+        'side': data['order_side'],  # "BUY" or "SELL" (строка)
         'price': str(data['target_price']),
         'amount': data['amount'],
         'token_name': data['token_name']
@@ -1099,15 +1273,16 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text("""🔄 Placing order...""")
     
-    success, order_id, error_message = await place_order(client, order_params)
+    success, order_id, error_message = await place_order(api_client, order_builder, order_params)
     
     if success:
         # Save order to database
         try:
             telegram_id = callback.from_user.id
             market_id = data['market_id']
-            market = data.get('market')
-            market_title = getattr(market, 'market_title', None) if market else None
+            market = data.get('market', {})
+            # Новое API: market - это словарь с полем 'title'
+            market_title = market.get('title') if market else None
             token_id = data['token_id']
             token_name = data['token_name']
             side = data['direction']  # BUY or SELL
@@ -1120,9 +1295,11 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
             reposition_threshold_cents = data.get('reposition_threshold_cents', 0.5)
             
             # Сохраняем ордер в базу данных
+            # order_id здесь - это order_hash (хэш ордера), который используется
+            # в orders_dialog.py для получения ордера через api_client.get_order_by_id(order_hash=order_id)
             await save_order(
                 telegram_id=telegram_id,
-                order_id=order_id,
+                order_id=order_id,  # Это order_hash, не orderId!
                 market_id=market_id,
                 market_title=market_title,
                 token_id=token_id,
@@ -1154,7 +1331,9 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
     else:
         error_text = f"""❌ <b>Failed to place order</b>
 
-{error_message if error_message else 'Please check your balance and order parameters.'}"""
+{error_message if error_message else 'Please check your balance and order parameters.'}
+
+Please try again using the /make_market command."""
         await callback.message.edit_text(error_text)
     
     await state.clear()

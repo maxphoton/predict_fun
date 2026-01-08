@@ -228,24 +228,28 @@ async def build_and_sign_limit_order(
             )
         )
         
+        # Отладочный лог: проверяем структуру объекта amounts
+        logger.debug(f"OrderAmounts object type: {type(amounts)}")
+        logger.debug(f"OrderAmounts attributes: {[attr for attr in dir(amounts) if not attr.startswith('_')]}")
+        if hasattr(amounts, '__dict__'):
+            logger.debug(f"OrderAmounts __dict__: {amounts.__dict__}")
+        
         # Шаг 2: Строим ордер
         # Определяем expires_at: используем переданное значение или значение по умолчанию (30 дней)
         if expires_at is None:
             expires_at = datetime.now(timezone.utc) + timedelta(days=30)
         
-        build_input = BuildOrderInput(
-            side=side,
-            token_id=token_id,
-            maker_amount=str(amounts.maker_amount),
-            taker_amount=str(amounts.taker_amount),
-            fee_rate_bps=fee_rate_bps,
-            expires_at=expires_at
-        )
-        
         order = await asyncio.to_thread(
             order_builder.build_order,
             "LIMIT",
-            build_input
+            BuildOrderInput(
+                side=side,
+                token_id=token_id,
+                maker_amount=str(amounts.maker_amount),
+                taker_amount=str(amounts.taker_amount),
+                fee_rate_bps=fee_rate_bps,
+                expires_at=expires_at
+            )
         )
         
         # Шаг 3: Генерируем typed data
@@ -268,57 +272,36 @@ async def build_and_sign_limit_order(
             typed_data
         )
         
-        # Преобразуем в словарь для удобства
-        # signed_order - это объект SignedOrder с полями order и signature
-        # order - это объект Order из SDK
-        
-        # Извлекаем данные ордера в словарь для отправки в API
-        # Согласно документации: order: { ...signedOrder, hash }
-        # signedOrder содержит order и signature
-        
         # Извлекаем signature из signed_order
         signature = signed_order.signature if hasattr(signed_order, 'signature') else None
+        if not signature:
+            logger.error("Signature отсутствует в signed_order")
+            return None
         
-        # Извлекаем order из signed_order или используем order напрямую
-        if hasattr(signed_order, 'order'):
-            order_obj = signed_order.order
-        else:
-            order_obj = order
-        
-        # Преобразуем order в словарь
-        if not isinstance(order_obj, dict):
-            # Преобразуем объект Order в словарь
-            order_dict = {
-                'hash': order_hash,  # Используем вычисленный hash
-                'salt': getattr(order_obj, 'salt', None),
-                'maker': getattr(order_obj, 'maker', None),
-                'signer': getattr(order_obj, 'signer', None),
-                'taker': getattr(order_obj, 'taker', None) or '0x0000000000000000000000000000000000000000',
-                'tokenId': getattr(order_obj, 'tokenId', None),
-                'makerAmount': str(getattr(order_obj, 'makerAmount', None)) if getattr(order_obj, 'makerAmount', None) is not None else None,
-                'takerAmount': str(getattr(order_obj, 'takerAmount', None)) if getattr(order_obj, 'takerAmount', None) is not None else None,
-                'expiration': getattr(order_obj, 'expiration', None),
-                'nonce': str(getattr(order_obj, 'nonce', None)) if getattr(order_obj, 'nonce', None) is not None else None,
-                'feeRateBps': str(getattr(order_obj, 'feeRateBps', None)) if getattr(order_obj, 'feeRateBps', None) is not None else None,
-                'side': getattr(order_obj, 'side', None),
-                'signatureType': getattr(order_obj, 'signatureType', 0),
-                'signature': signature  # Добавляем signature в order
-            }
-        else:
-            # Уже словарь, добавляем hash и signature
-            order_dict = order_obj.copy()
-            order_dict['hash'] = order_hash
-            if signature:
-                order_dict['signature'] = signature
-        
-        # Сохраняем pricePerShare из amounts (нужен для API запроса)
-        price_per_share = getattr(amounts, 'price_per_share', None) or getattr(amounts, 'pricePerShare', None)
+        # Явно собираем объект order для API из данных SDK
+        # Python SDK использует snake_case, но API требует camelCase
+        order_dict = {
+            'hash': order_hash,
+            'salt': str(order.salt),
+            'maker': str(order.maker),
+            'signer': str(order.signer),
+            'taker': '0x0000000000000000000000000000000000000000',
+            'tokenId': str(order.token_id),
+            'makerAmount': str(order.maker_amount),
+            'takerAmount': str(order.taker_amount),
+            'expiration': int(order.expiration),
+            'nonce': str(order.nonce),
+            'feeRateBps': str(order.fee_rate_bps),
+            'side': int(order.side),
+            'signatureType': 0,
+            'signature': signature
+        }
         
         result = {
             'order': order_dict,
             'signature': signature,
             'hash': order_hash,
-            'pricePerShare': str(price_per_share) if price_per_share is not None else None
+            'pricePerShare': str(amounts.price_per_share)
         }
         
         logger.info(f"Ордер успешно построен и подписан: hash={order_hash}")

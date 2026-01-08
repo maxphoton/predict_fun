@@ -36,7 +36,7 @@ from orders_dialog import orders_dialog, OrdersSG
 # from sync_orders import async_sync_all_orders
 from logger_config import setup_root_logger
 from start_router import start_router
-# from market_router import market_router
+from market_router import market_router
 from help_text import HELP_TEXT, HELP_TEXT_ENG, HELP_TEXT_CN
 
 # Загружаем переменные окружения
@@ -44,7 +44,7 @@ load_dotenv()
 
 # Настройка логирования
 # Настраиваем корневой логгер - все модули будут логировать в logs/bot.log
-setup_root_logger("bot.log")
+setup_root_logger("bot.log", file_level=logging.INFO, console_level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Инициализация бота и диспетчера
@@ -411,7 +411,7 @@ async def main():
     
     # Регистрируем роутеры
     dp.include_router(start_router)  # User registration router
-    # dp.include_router(market_router)  # Market order placement router
+    dp.include_router(market_router)  # Market order placement router
     dp.include_router(router)  # Main router (orders, get_db, etc.)
     
     # Запускаем фоновую задачу синхронизации ордеров

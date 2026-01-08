@@ -141,20 +141,22 @@ class PredictAPIClient:
                 
                 response = await asyncio.to_thread(_retry_request_sync)
             
-            # Проверяем статус ответа
-            if response.status_code not in (200, 201):
-                logger.error(
-                    f"Ошибка API запроса {method} {url}: "
-                    f"status={response.status_code}, response={response.text[:200]}"
-                )
-                return None
-            
-            # Парсим JSON ответ
+            # Парсим JSON ответ (всегда, независимо от статус-кода)
             try:
                 data = response.json()
+                # Если статус не успешный, логируем ошибку, но возвращаем данные
+                if response.status_code not in (200, 201):
+                    logger.error(
+                        f"Ошибка API запроса {method} {url}: "
+                        f"status={response.status_code}, response={response.text}"
+                    )
                 return data
             except ValueError as e:
-                logger.error(f"Ошибка парсинга JSON ответа: {e}")
+                # Если не JSON, логируем и возвращаем None
+                logger.error(
+                    f"Ошибка парсинга JSON ответа {method} {url}: {e}. "
+                    f"Status={response.status_code}, response={response.text}"
+                )
                 return None
                 
         except Exception as e:
@@ -355,10 +357,18 @@ class PredictAPIClient:
         Note:
             Требует x-api-key и JWT токен (Bearer Authentication).
         """
-        # Формируем тело запроса согласно OpenAPI спецификации
+        # Проверяем, что order содержит все обязательные поля
+        required_order_fields = ['salt', 'maker', 'signer', 'taker', 'tokenId', 'makerAmount', 
+                                'takerAmount', 'expiration', 'nonce', 'feeRateBps', 'side', 
+                                'signatureType', 'signature']
+        missing_fields = [field for field in required_order_fields if field not in order or order[field] is None]
+        if missing_fields:
+            logger.error(f"Отсутствуют обязательные поля в order: {missing_fields}")
+            return None
+        
         request_data = {
             'data': {
-                'pricePerShare': str(price_per_share),  # Обязательный параметр
+                'pricePerShare': price_per_share,  # Обязательный параметр, integer string
                 'strategy': strategy.upper(),
                 'order': order
             }
@@ -372,12 +382,19 @@ class PredictAPIClient:
             # Если не указан, используем "0" (для LIMIT это нормально)
             request_data['data']['slippageBps'] = "0"
         
+        # Логируем запрос для отладки (без signature для безопасности)
+        order_for_log = {k: v for k, v in order.items() if k != 'signature'}
+        logger.debug(f"Place order request: pricePerShare={price_per_share}, strategy={strategy.upper()}, order keys={list(order_for_log.keys())}")
+        
         if is_fill_or_kill:
             request_data['data']['isFillOrKill'] = is_fill_or_kill
         
         data = await self._make_request('POST', 'orders', json_data=request_data)
         if data and 'data' in data:
             return data['data']
+        # Если data есть, но нет 'data', значит это ошибка - возвращаем её для обработки
+        if data:
+            return data
         return None
     
     async def cancel_orders(self, order_ids: List[str]) -> Dict:
