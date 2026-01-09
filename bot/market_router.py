@@ -1207,6 +1207,7 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
             f"""✅ <b>Order successfully placed!</b>
 
 📋 <b>Final Information:</b>
+• Market: {market_title}
 • Side: {data['direction']} {data['token_name']}
 • Price: {data['target_price']:.6f}
 • Amount: {data['amount']} USDT
