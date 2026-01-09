@@ -47,13 +47,13 @@ async def get_market_info(client: Client, market_id: int, is_categorical: bool =
 **Описание:** Получение информации о категориальном рынке (рынок с несколькими исходами).
 
 **Используется в:**
-- `bot/market_router.py:76` - получение информации о категориальном рынке при размещении ордера
+- `bot/market_router.py:78` - получение информации о категориальном рынке при размещении ордера через команду `/make_market`
 
 **Параметры:**
-- `market_id` (int): ID категориального рынка
+- `market_id` (int): ID рынка
 
-**Возвращает:**
-- Объект ответа с полями: `errno`, `errmsg`, `result.data` (данные категориального рынка, включая `child_markets`)
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`, `result.data` (данные рынка)
 
 **Контекст использования:**
 ```python
@@ -63,546 +63,144 @@ async def get_market_info(client: Client, market_id: int, is_categorical: bool =
         response = client.get_categorical_market(market_id=market_id)
     else:
         response = client.get_market(market_id=market_id, use_cache=True)
+    
+    if response.errno == 0:
+        return response.result.data
 ```
 
 ---
 
 ### 3. `get_orderbook(token_id)`
 
-**Описание:** Получение orderbook (стакан заявок) для токена.
+**Описание:** Получение orderbook для токена (YES или NO токен).
 
 **Используется в:**
-- `bot/market_router.py:103, 110` - получение orderbook для YES и NO токенов при размещении ордера
-- `bot/sync_orders.py:153` - получение текущей цены рынка для синхронизации ордеров
+- `bot/sync_orders.py:347` - получение текущей цены рынка для расчета необходимости перестановки ордера
 
 **Параметры:**
-- `token_id` (str): ID токена (yes_token_id или no_token_id)
+- `token_id` (str): ID токена (onChainId из outcomes рынка)
 
-**Возвращает:**
-- Объект ответа с полями: `errno`, `errmsg`, `result` (объект orderbook с полями `bids` и `asks`)
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`, `result.data` (orderbook)
 
 **Контекст использования:**
-
-**В market_router.py:**
 ```python
-# bot/market_router.py:97-116
-async def get_orderbooks(client: Client, yes_token_id: str, no_token_id: str):
-    yes_orderbook = None
-    no_orderbook = None
-    
-    try:
-        response = client.get_orderbook(token_id=yes_token_id)
-        if response.errno == 0:
-            yes_orderbook = response.result if hasattr(response.result, 'bids') else getattr(response.result, 'data', response.result)
-    except Exception as e:
-        logger.error(f"Error getting orderbook for YES: {e}")
-    
-    try:
-        response = client.get_orderbook(token_id=no_token_id)
-        if response.errno == 0:
-            no_orderbook = response.result if hasattr(response.result, 'bids') else getattr(response.result, 'data', response.result)
-    except Exception as e:
-        logger.error(f"Error getting orderbook for NO: {e}")
-    
-    return yes_orderbook, no_orderbook
-```
-
-**В sync_orders.py:**
-```python
-# bot/sync_orders.py:140-198
-def get_current_market_price(client, token_id: str, side: str) -> Optional[float]:
-    try:
-        response = client.get_orderbook(token_id=token_id)
-        
-        if response.errno != 0:
-            logger.error(f"Ошибка получения orderbook для токена {token_id}: errno={response.errno}")
-            return None
-        
-        orderbook = response.result if not hasattr(response.result, 'data') else response.result.data
-        
-        bids = orderbook.bids if hasattr(orderbook, 'bids') else []
-        asks = orderbook.asks if hasattr(orderbook, 'asks') else []
-        
-        if side == "BUY":
-            # Для BUY берем best_bid (самый высокий бид)
-            if bids and len(bids) > 0:
-                bid_prices = [float(bid.price) for bid in bids if hasattr(bid, 'price')]
-                if bid_prices:
-                    return max(bid_prices)  # Самый высокий бид
-        else:  # SELL
-            # Для SELL берем best_ask (самый низкий аск)
-            if asks and len(asks) > 0:
-                ask_prices = [float(ask.price) for ask in asks if hasattr(ask, 'price')]
-                if ask_prices:
-                    return min(ask_prices)  # Самый низкий аск
+# bot/sync_orders.py:347
+new_current_price = await get_current_market_price(client, market_id, side, token_name)
 ```
 
 ---
 
-### 4. `get_my_balances()`
+### 4. `enable_trading()`
 
-**Описание:** Получение балансов пользователя (USDT и других токенов).
+**Описание:** Включение торговли (установка approvals для токенов).
 
 **Используется в:**
-- `bot/market_router.py:208` - проверка баланса USDT перед размещением ордера
+- `bot/sync_orders.py:623` - включение торговли перед размещением ордеров
 
 **Параметры:** Нет
 
-**Возвращает:**
-- Объект ответа с полями: `errno`, `errmsg`, `result` (объект с балансами, включая `balances` или `available_balance`)
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`
 
 **Контекст использования:**
 ```python
-# bot/market_router.py:205-227
-async def check_usdt_balance(client: Client, required_amount: float) -> Tuple[bool, dict]:
-    """Checks if USDT balance is sufficient."""
-    try:
-        response = client.get_my_balances()
-        
-        if response.errno != 0:
-            return False, {}
-        
-        balance_data = response.result if not hasattr(response.result, 'data') else response.result.data
-        
-        available = 0.0
-        if hasattr(balance_data, 'balances') and balance_data.balances:
-            for balance in balance_data.balances:
-                available += float(getattr(balance, 'available_balance', 0))
-        elif hasattr(balance_data, 'available_balance'):
-            available = float(balance_data.available_balance)
-        elif hasattr(balance_data, 'available'):
-            available = float(balance_data.available)
-        
-        return available >= required_amount, balance_data
+# bot/sync_orders.py:623
+client.enable_trading()
 ```
 
 ---
 
-### 5. `enable_trading()`
+### 5. `place_orders_batch(orders)`
 
-**Описание:** Включение режима торговли. Необходимо вызывать перед размещением ордеров для активации торговых функций клиента.
-
-**Используется в:**
-- `bot/market_router.py:238` - перед размещением ордера при команде `/make_market`
-- `bot/sync_orders.py:514` - перед размещением ордеров в батче при синхронизации
-
-**Параметры:** Нет
-
-**Возвращает:** None (метод изменяет состояние клиента)
-
-**Контекст использования:**
-
-**В market_router.py:**
-```python
-# bot/market_router.py:230-290
-async def place_order(client: Client, order_params: dict) -> Tuple[bool, Optional[str], Optional[str]]:
-    try:
-        client.enable_trading()
-        
-        price = float(order_params['price'])
-        price_rounded = round(price, 3)  # API requires max 3 decimal places
-        
-        # ... создание order_data ...
-        
-        def _place_order_sync():
-            return client.place_order(order_data, check_approval=True)
-        
-        result = await asyncio.to_thread(_place_order_sync)
-```
-
-**В sync_orders.py:**
-```python
-# bot/sync_orders.py:502-578
-def place_orders_batch(client, orders_params: List[Dict]) -> List:
-    try:
-        client.enable_trading()
-        
-        # Преобразуем параметры в PlaceOrderDataInput
-        orders = []
-        for params in orders_params:
-            # ... создание order_input ...
-            orders.append(order_input)
-        
-        # Размещаем ордера батчем
-        results = client.place_orders_batch(orders, check_approval=False)
-```
-
----
-
-### 6. `place_order(order_data, check_approval=True)`
-
-**Описание:** Размещение одного лимитного ордера.
+**Описание:** Размещение нескольких ордеров одновременно.
 
 **Используется в:**
-- `bot/market_router.py:268` - размещение ордера при команде `/make_market`
+- `bot/sync_orders.py:623` - размещение новых ордеров после отмены старых
 
 **Параметры:**
-- `order_data` (PlaceOrderDataInput): Данные ордера (marketId, tokenId, side, orderType, price, makerAmountInQuoteToken)
-- `check_approval` (bool): Проверять approvals перед размещением (по умолчанию True)
+- `orders` (list): Список словарей с данными ордеров
 
-**Возвращает:**
-- Объект результата с полями: `errno` (0 = успех), `errmsg`, `result.order_data.order_id`
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`, `result.data` (список результатов размещения)
 
 **Контекст использования:**
 ```python
-# bot/market_router.py:230-290
-async def place_order(client: Client, order_params: dict) -> Tuple[bool, Optional[str], Optional[str]]:
-    try:
-        client.enable_trading()
-        
-        price = float(order_params['price'])
-        price_rounded = round(price, 3)
-        
-        order_data = PlaceOrderDataInput(
-            marketId=order_params['market_id'],
-            tokenId=order_params['token_id'],
-            side=order_params['side'],
-            orderType=LIMIT_ORDER,
-            price=str(price_rounded),
-            makerAmountInQuoteToken=order_params['amount']
-        )
-        
-        def _place_order_sync():
-            return client.place_order(order_data, check_approval=True)
-        
-        result = await asyncio.to_thread(_place_order_sync)
-        
-        if result.errno == 0:
-            order_id = 'N/A'
-            if hasattr(result, 'result'):
-                if hasattr(result.result, 'order_data'):
-                    order_data_obj = result.result.order_data
-                    if hasattr(order_data_obj, 'order_id'):
-                        order_id = order_data_obj.order_id
-                    elif hasattr(order_data_obj, 'id'):
-                        order_id = order_data_obj.id
-            
-            return True, str(order_id), None
-        else:
-            error_msg = result.errmsg if hasattr(result, 'errmsg') and result.errmsg else f"Error code: {result.errno}"
-            return False, None, error_msg
+# bot/sync_orders.py:623
+results = client.place_orders_batch(orders)
 ```
 
 ---
 
-### 7. `place_orders_batch(orders, check_approval=False)`
+### 6. `cancel_orders_batch(order_ids)`
 
-**Описание:** Размещение нескольких ордеров батчем (одной транзакцией).
+**Описание:** Отмена нескольких ордеров одновременно.
 
 **Используется в:**
-- `bot/sync_orders.py:537` - размещение новых ордеров при синхронизации (перестановка ордеров)
+- `bot/sync_orders.py:623` - отмена старых ордеров перед размещением новых
 
 **Параметры:**
-- `orders` (List[PlaceOrderDataInput]): Список данных ордеров
-- `check_approval` (bool): Проверять approvals перед размещением (по умолчанию False для батча)
+- `order_ids` (list): Список ID ордеров для отмены
 
-**Возвращает:**
-- Список результатов размещения для каждого ордера. Каждый результат имеет структуру:
-  ```python
-  {
-      'success': bool,
-      'result': API response объект с полями errno, errmsg, result.order_data.order_id,
-      'error': Any (если есть ошибка)
-  }
-  ```
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`, `result.data` (список результатов отмены)
 
 **Контекст использования:**
 ```python
-# bot/sync_orders.py:502-578
-def place_orders_batch(client, orders_params: List[Dict]) -> List:
-    try:
-        client.enable_trading()
-        
-        # Преобразуем параметры в PlaceOrderDataInput
-        orders = []
-        for params in orders_params:
-            price_rounded = round(float(params["price"]), 3)
-            
-            amount_value = params["amount"]
-            if isinstance(amount_value, str):
-                amount_value = float(amount_value)
-            
-            order_input = PlaceOrderDataInput(
-                marketId=params["market_id"],
-                tokenId=params["token_id"],
-                side=params["side"],
-                orderType=LIMIT_ORDER,
-                price=str(price_rounded),
-                makerAmountInQuoteToken=amount_value
-            )
-            orders.append(order_input)
-        
-        # Размещаем ордера батчем
-        results = client.place_orders_batch(orders, check_approval=False)
-        
-        # Обработка результатов...
-        for i, result in enumerate(results):
-            if result.get('success', False):
-                result_data = result.get('result')
-                if result_data and result_data.errno == 0:
-                    order_id = result_data.result.order_data.order_id
-                    logger.info(f"Размещен ордер: {order_id}")
+# bot/sync_orders.py:623
+results = client.cancel_orders_batch(order_ids)
 ```
 
 ---
 
-### 8. `cancel_order(order_id)`
+### 7. `cancel_order(order_id)`
 
 **Описание:** Отмена одного ордера.
 
 **Используется в:**
-- `bot/orders_dialog.py:228` - отмена ордера пользователем через диалог `/orders`
+- `bot/orders_dialog.py:244` - отмена ордера пользователем через команду `/orders`
 
 **Параметры:**
 - `order_id` (str): ID ордера для отмены
 
-**Возвращает:**
-- Объект результата с полями: `errno` (0 = успех), `errmsg`
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`
 
 **Контекст использования:**
 ```python
-# bot/orders_dialog.py:186-248
-async def cancel_order_input_handler(message: Message, message_input: MessageInput, manager: DialogManager):
-    """Обработчик ввода order_id для отмены ордера."""
-    # ... проверки ...
-    
-    # Создаем клиент
-    client = create_client(user)
-    
-    try:
-        # Отменяем ордер
-        result = client.cancel_order(order_id=order_id)
-        
-        if result.errno == 0:
-            # Обновляем статус в БД
-            await update_order_status(order_id, "canceled")
-            await message.answer(f"✅ Order <code>{order_id}</code> successfully cancelled.")
-        else:
-            errmsg = getattr(result, 'errmsg', 'Unknown error')
-            error_message = f"❌ Failed to cancel order <code>{order_id}</code>.\n\nError code: {result.errno}\nError message: {errmsg}"
-            await message.answer(error_message)
+# bot/orders_dialog.py:244
+response = client.cancel_order(order_id)
 ```
 
 ---
 
-### 9. `cancel_orders_batch(order_ids)`
+### 8. `get_my_balances()`
 
-**Описание:** Отмена нескольких ордеров батчем (одной транзакцией).
+**Описание:** Получение балансов пользователя.
 
 **Используется в:**
-- `bot/sync_orders.py:467` - отмена старых ордеров при синхронизации (перед размещением новых)
+- `bot/start_router.py:216` - проверка подключения к API и отображение баланса при регистрации
 
-**Параметры:**
-- `order_ids` (List[str]): Список ID ордеров для отмены
+**Параметры:** Нет
 
-**Возвращает:**
-- Список результатов отмены для каждого ордера. Каждый результат имеет структуру:
-  ```python
-  {
-      'success': bool,
-      'result': API response объект с полями errno, errmsg,
-      'error': Any (если есть ошибка)
-  }
-  ```
+**Возвращает:** 
+- Объект ответа с полями: `errno`, `errmsg`, `result.data` (балансы)
 
 **Контекст использования:**
 ```python
-# bot/sync_orders.py:455-499
-def cancel_orders_batch(client, order_ids: List[str]) -> List[Dict]:
-    """
-    Отменяет ордера батчем.
-    """
-    try:
-        results = client.cancel_orders_batch(order_ids)
-        
-        success_count = 0
-        failed_count = 0
-        
-        for i, result in enumerate(results):
-            if result.get('success', False):
-                result_data = result.get('result')
-                if result_data:
-                    if hasattr(result_data, 'errno'):
-                        if result_data.errno == 0:
-                            logger.info(f"Отменен ордер: {order_ids[i]}")
-                        else:
-                            logger.error(f"Ошибка при отмене ордера {order_ids[i]}: errno={result_data.errno}")
-                            failed_count += 1
-                            success_count -= 1
+# bot/start_router.py:216
+response = client.get_my_balances()
 ```
 
 ---
 
-### 10. `get_my_orders(market_id=0, status="", limit=10, page=1)`
-
-**Описание:** Получение списка ордеров пользователя с пагинацией.
-
-**Используется в:**
-- `bot/opinion_api_wrapper.py:134` - обертка для получения ордеров (используется в `start_router.py:228`)
-
-**Параметры:**
-- `market_id` (int): ID рынка для фильтрации (0 = все рынки)
-- `status` (str): Фильтр по статусу:
-  - `"1"` = Pending (открытый/активный ордер)
-  - `"2"` = Finished (исполненный ордер)
-  - `"3"` = Canceled (отмененный ордер)
-  - `""` = все статусы
-- `limit` (int): Количество ордеров на странице (по умолчанию 10, максимум 20 без пагинации)
-- `page` (int): Номер страницы для пагинации (по умолчанию 1)
-
-**Возвращает:**
-- Объект ответа с полями: `errno`, `errmsg`, `result.list` (список объектов ордеров)
-
-**Контекст использования:**
-
-**В opinion_api_wrapper.py:**
-```python
-# bot/opinion_api_wrapper.py:85-162
-async def get_my_orders(
-    client,
-    market_id: int = 0,
-    status: str = "",
-    limit: int = 10,
-    page: int = 1
-) -> List[Any]:
-    try:
-        params = {
-            'market_id': market_id,
-            'status': status,
-            'limit': limit,
-            'page': page
-        }
-        
-        # Вызываем API в отдельном потоке, так как SDK синхронный
-        response = await asyncio.to_thread(client.get_my_orders, **params)
-        
-        if response.errno != 0:
-            logger.warning(f"Ошибка при получении ордеров: errno={response.errno}")
-            return []
-        
-        if not hasattr(response, 'result') or not response.result:
-            return []
-        
-        if not hasattr(response.result, 'list'):
-            return []
-        
-        order_list = response.result.list
-        return order_list if order_list else []
-```
-
-**В start_router.py:**
-```python
-# bot/start_router.py:216-231
-try:
-    test_user_data = {
-        'wallet_address': wallet_address,
-        'private_key': private_key,
-        'api_key': api_key_clean
-    }
-    
-    test_client = create_client(test_user_data)
-    
-    # Пытаемся получить ордера пользователя для проверки подключения
-    orders = await get_my_orders(test_client, market_id=0, status="", limit=1, page=1)
-    
-    # Если дошли сюда без исключений, значит подключение успешно
-    logger.info(f"Успешная проверка подключения для пользователя {telegram_id}")
-```
-
----
-
-### 11. `get_order_by_id(order_id)`
-
-**Описание:** Получение ордера по его ID.
-
-**Используется в:**
-- `bot/opinion_api_wrapper.py:183` - обертка для получения ордера по ID (используется в `sync_orders.py:303`)
-
-**Параметры:**
-- `order_id` (str): ID ордера
-
-**Возвращает:**
-- Объект ответа с полями: `errno`, `errmsg`, `result.order_data` (объект ордера со всеми полями)
-
-**Контекст использования:**
-
-**В opinion_api_wrapper.py:**
-```python
-# bot/opinion_api_wrapper.py:165-222
-async def get_order_by_id(client, order_id: str) -> Optional[Any]:
-    try:
-        logger.info(f"Запрос ордера по ID из API: order_id={order_id}")
-        
-        # Вызываем API в отдельном потоке, так как SDK синхронный
-        response = await asyncio.to_thread(client.get_order_by_id, order_id=order_id)
-        
-        if response.errno != 0:
-            logger.warning(f"Ошибка при получении ордера: errno={response.errno}")
-            return None
-        
-        if not hasattr(response, 'result') or not response.result:
-            return None
-        
-        if not hasattr(response.result, 'order_data'):
-            return None
-        
-        order = response.result.order_data
-        return order
-```
-
-**В sync_orders.py:**
-```python
-# bot/sync_orders.py:300-343
-# Проверяем статус ордера через API
-try:
-    api_order = await get_order_by_id(client, order_id)
-    if api_order:
-        # Получаем числовой статус из API и приводим к строке
-        api_status = str(getattr(api_order, 'status', None))
-        
-        # Если статус в БД был 'pending', а в API стал 'Finished' (finished)
-        if db_status == 'pending' and api_status == ORDER_STATUS_FINISHED:
-            logger.info(f"Ордер {order_id} был pending, теперь finished. Обновляем БД и отправляем уведомление.")
-            await update_order_status(order_id, 'finished')
-            if bot:
-                await send_order_filled_notification(bot, telegram_id, api_order)
-            continue
-        
-        # Если статус в БД был 'pending', а в API стал 'Canceled' (canceled)
-        elif db_status == 'pending' and api_status == ORDER_STATUS_CANCELED:
-            logger.info(f"Ордер {order_id} был pending, теперь canceled. Обновляем БД.")
-            await update_order_status(order_id, 'canceled')
-            continue
-```
-
----
-
-## Сводная таблица использования методов
-
-| Метод | Файл | Строка | Контекст использования |
-|-------|------|--------|------------------------|
-| `get_market()` | `market_router.py` | 78 | Получение информации о рынке при размещении ордера |
-| `get_categorical_market()` | `market_router.py` | 76 | Получение информации о категориальном рынке |
-| `get_orderbook()` | `market_router.py` | 103, 110 | Получение orderbook для YES/NO токенов при размещении ордера |
-| `get_orderbook()` | `sync_orders.py` | 153 | Получение текущей цены рынка для синхронизации ордеров |
-| `get_my_balances()` | `market_router.py` | 208 | Проверка баланса USDT перед размещением ордера |
-| `enable_trading()` | `market_router.py` | 238 | Включение режима торговли перед размещением ордера |
-| `enable_trading()` | `sync_orders.py` | 514 | Включение режима торговли перед батч размещением |
-| `place_order()` | `market_router.py` | 268 | Размещение ордера при команде `/make_market` |
-| `place_orders_batch()` | `sync_orders.py` | 537 | Размещение новых ордеров при синхронизации (перестановка) |
-| `cancel_order()` | `orders_dialog.py` | 228 | Отмена ордера пользователем через диалог `/orders` |
-| `cancel_orders_batch()` | `sync_orders.py` | 467 | Отмена старых ордеров при синхронизации (перед размещением новых) |
-| `get_my_orders()` | `opinion_api_wrapper.py` | 134 | Обертка для получения ордеров (используется в `start_router.py:228`) |
-| `get_order_by_id()` | `opinion_api_wrapper.py` | 183 | Обертка для получения ордера по ID (используется в `sync_orders.py:303`) |
-
----
-
-## Файлы, использующие API методы
+## Файлы, использующие старое API
 
 ### Основные файлы
 
 1. **`bot/market_router.py`** - Размещение ордеров через команду `/make_market`
-   - Использует: `get_market()`, `get_categorical_market()`, `get_orderbook()`, `get_my_balances()`, `enable_trading()`, `place_order()`
+   - Использует: `get_market()`, `get_categorical_market()`, `place_order()`
+   - Использует через обертку: `get_orderbook()` (из `opinion_api_wrapper.py`)
 
 2. **`bot/sync_orders.py`** - Автоматическая синхронизация и перестановка ордеров
    - Использует: `get_orderbook()`, `enable_trading()`, `place_orders_batch()`, `cancel_orders_batch()`
@@ -661,101 +259,95 @@ try:
 | `get_market(market_id)` | `get_market(market_id)` | ✅ Прямая замена, но структура ответа изменилась |
 | `get_categorical_market(market_id)` | `get_market(market_id)` | ✅ Используется тот же метод (категориальные рынки обрабатываются автоматически) |
 | `get_orderbook(token_id)` | `get_orderbook(market_id)` | ⚠️ Изменился параметр: `token_id` → `market_id`, структура ответа изменилась |
-| `get_my_balances()` | `get_usdt_balance(order_builder)` | ⚠️ Теперь через SDK (on-chain), требует `OrderBuilder` |
-| `get_my_orders(market_id, status, limit, page)` | `get_my_orders(first, after, status)` | ⚠️ Изменилась пагинация: `limit/page` → `first/after`, убран параметр `market_id` |
+| `get_my_orders(...)` | `get_my_orders(first, after, status)` | ⚠️ Изменилась пагинация: `limit, page` → `first, after` (cursor-based) |
 | `get_order_by_id(order_id)` | `get_order_by_id(order_hash)` | ⚠️ Изменился параметр: `order_id` → `order_hash` |
-| `place_order(order_data)` | `build_and_sign_limit_order()` + `place_order()` | ⚠️ Двухэтапный процесс: сначала SDK, потом REST API |
-| `place_orders_batch(orders)` | Множественные вызовы `build_and_sign_limit_order()` + `place_order()` | ⚠️ Батч размещение через цикл |
-| `cancel_order(order_id)` | `cancel_orders([order_id])` или `cancel_orders_via_sdk()` | ⚠️ Для off-chain: `cancel_orders()`, для on-chain: `cancel_orders_via_sdk()` |
-| `cancel_orders_batch(order_ids)` | `cancel_orders(order_ids)` или `cancel_orders_via_sdk()` | ⚠️ Для off-chain: `cancel_orders()`, для on-chain: `cancel_orders_via_sdk()` |
-| `enable_trading()` | `set_approvals(order_builder)` | ⚠️ Теперь on-chain транзакции (требует gas), вызывать **ОДИН РАЗ на кошелек** (не перед каждым ордером!) |
+| `get_my_balances()` | `get_usdt_balance(order_builder)` или `get_positions()` | ⚠️ Разные методы для разных целей |
+| `enable_trading()` | `set_approvals(order_builder, is_yield_bearing)` | ⚠️ Теперь on-chain операция, требует gas, вызывается ОДИН РАЗ |
+| `place_order(...)` | `build_and_sign_limit_order(...)` + `place_order(...)` | ⚠️ Теперь двухэтапный процесс: SDK для подписи + REST API для размещения |
+| `place_orders_batch(...)` | Цикл: `build_and_sign_limit_order(...)` + `place_order(...)` | ⚠️ Batch размещение заменено на цикл |
+| `cancel_order(order_id)` | `cancel_orders([order_id])` | ✅ Прямая замена, но теперь принимает список |
+| `cancel_orders_batch(order_ids)` | `cancel_orders(order_ids)` | ✅ Прямая замена |
 
 ### Изменения в идентификаторах
 
-- **Старое API:** `order_id` (строка, например `"def73c87-e120-11f0-8edd-0a58a9feac02"`)
-- **Новое API:** 
-  - `order.hash` (hash ордера, строка) - для получения ордера
-  - `order.id` (строка, bigint) - для отмены через `cancel_orders()`
+1. **Order ID vs Order Hash:**
+   - **Старое API:** Использовался `order_id` (строка) для всех операций
+   - **Новое API:** 
+     - `order.hash` - hash ордера (используется для получения ордера через `get_order_by_id`)
+     - `order.id` - bigint string (используется для off-chain отмены через `cancel_orders`)
+   - **В БД:** Хранится `order_hash` (hash ордера) и `order_api_id` (ID для отмены)
+
+2. **Market ID:**
+   - Остался без изменений (int)
+
+3. **Token ID:**
+   - Остался без изменений (строка, onChainId из outcomes)
 
 ### Изменения в пагинации
 
-- **Старое API:** `limit` и `page` (page-based пагинация)
-- **Новое API:** `first` и `after` (cursor-based пагинация)
-  - `first` - количество элементов (string, число)
-  - `after` - cursor для следующей страницы (string, может быть None)
-  - Возвращает `(items, cursor)` tuple
+- **Старое API:** Page-based пагинация (`limit`, `page`)
+- **Новое API:** Cursor-based пагинация (`first`, `after`)
+  - `first` - количество элементов (строка, число)
+  - `after` - cursor для следующей страницы (строка) или `None` для первой страницы
+  - Возвращает: `(список, cursor)` где `cursor` может быть `None` для последней страницы
 
 ### Изменения в структуре orderbook
 
-- **Старое API:** `get_orderbook(token_id)` - возвращает объект с `bids` и `asks` (объекты с полями `price`, `size`)
-- **Новое API:** `get_orderbook(market_id)` - возвращает Dict:
-  ```python
-  {
-      'marketId': int,
-      'updateTimestampMs': int,
-      'asks': [[price, size], ...],  # Массив массивов [цена, размер]
-      'bids': [[price, size], ...]    # Массив массивов [цена, размер]
-  }
-  ```
-  - ⚠️ Изменился параметр: `token_id` → `market_id`
-  - ⚠️ Структура данных: объекты → массивы массивов
-  - ⚠️ Orderbook хранит цены на основе исхода "Yes", для "No": `price_no = 1 - price_yes`
+- **Старое API:** Сложная структура с вложенными объектами
+- **Новое API:** Простая структура: `{'asks': [[price, size], ...], 'bids': [[price, size], ...]}`
+  - `asks` и `bids` - массивы массивов `[цена, размер]`
+  - Цены в формате wei (нужно делить на 1e18 для получения USDT)
 
 ### Изменения в отмене ордеров
 
-- **Старое API:** 
-  - `cancel_order(order_id)` - отмена одного ордера (on-chain, требует gas)
-  - `cancel_orders_batch(order_ids)` - отмена нескольких ордеров (on-chain, требует gas)
+#### ⚠️ Важно: Два типа отмены
 
-- **Новое API:** 
-  - `cancel_orders(order_ids)` - удаление из orderbook (off-chain, **не требует gas**)
-    - Принимает список `order_ids` (строки, bigint)
-    - Возвращает `{'success': bool, 'removed': [...], 'noop': [...]}`
-    - ⚠️ **НЕ отменяет ордер в блокчейне** - ордер может быть исполнен, если кто-то знает его hash
-    - ⚠️ **Риск**: Используйте только если понимаете последствия
-  - `cancel_orders_via_sdk(order_builder, orders, is_neg_risk, is_yield_bearing)` - полная on-chain отмена (требует gas)
-    - Принимает список ордеров (словари или Order объекты)
-    - Автоматически группирует по `isNegRisk` и `isYieldBearing`
-    - ✅ **Отменяет ордер в блокчейне** - ордер инвалидирован и не может быть исполнен
-    - ⚠️ **НЕ удаляет автоматически из orderbook** - ордер может остаться видимым, но это безопасно
-    - ✅ **Рекомендуется** для большинства случаев (включая `sync_orders.py`)
+**Off-chain отмена** (`cancel_orders` через REST API):
+- Удаляет ордер из orderbook (off-chain)
+- **НЕ отменяет ордер в блокчейне**
+- Не требует газа
+- ⚠️ **Риск**: Ордер может быть исполнен, если кто-то знает его hash
 
-**Важно: Что произойдет, если ордер отменен on-chain, но остался в orderbook?**
+**On-chain отмена** (`cancel_orders_via_sdk` через SDK):
+- Отменяет ордер в блокчейне (инвалидирует его)
+- **НЕ удаляет автоматически из orderbook**
+- Требует газа
+- ✅ **Безопасно**: Ордер не может быть исполнен, даже если останется видимым в orderbook
+- ✅ **Рекомендуется**: Для большинства случаев используйте on-chain отмену
+
+**Что произойдет, если ордер отменен on-chain, но остался в orderbook?**
 - Если кто-то попытается исполнить такой ордер, транзакция **провалится** на уровне смарт-контракта
 - Ордер инвалидирован в блокчейне, исполнение невозможно
-- Ордер может остаться видимым в orderbook, но это безопасно (не может быть исполнен)
+
+**Рекомендация из документации:**
+- Для обычной отмены используйте `cancel_orders()` (off-chain, быстро, бесплатно)
+- Для критичных случаев используйте `cancel_orders_via_sdk()` (on-chain, безопасно, требует gas)
 
 ### Изменения в размещении ордеров
 
-- **Старое API:** `place_order(order_data)` - автоматически строит и подписывает ордер
-- **Новое API:** Двухэтапный процесс:
-  1. **SDK:** `build_and_sign_limit_order(order_builder, side, token_id, price_per_share_wei, quantity_wei, fee_rate_bps, is_neg_risk, is_yield_bearing, expires_at)`
-     - Строит и подписывает ордер **локально** (приватный ключ не покидает ваше устройство)
-     - Рассчитывает все необходимые поля: `nonce`, `salt`, `makerAmount`, `takerAmount`, `hash`
-     - Подписывает ордер криптографической подписью (ECDSA)
-     - Возвращает `{'order': {...}, 'pricePerShare': str, 'hash': str, 'signature': str}`
-  2. **REST API:** `place_order(order, price_per_share, strategy, slippage_bps, is_fill_or_kill)`
-     - Размещает **уже подписанный** ордер в orderbook
-     - **Не требует газа** (off-chain операция)
-     - Возвращает `{'code': 'OK', 'orderId': str, 'orderHash': str}`
-
 **Почему нужна комбинация методов?**
-- 🔒 **Безопасность**: Приватный ключ **никогда** не передается в API (остается локально)
-- ✅ **Криптографическая подпись**: Подпись доказывает, что ордер создан владельцем приватного ключа
-- 🔗 **Децентрализация**: Подпись проверяется на блокчейне при исполнении ордера
-- 📝 **Правильные расчеты**: SDK правильно рассчитывает `nonce`, `salt`, `hash`, `makerAmount`, `takerAmount` и другие поля
-- 🛡️ **Защита от подделки**: API не может создать ордер от вашего имени без вашей подписи
+
+API требует **уже подписанный ордер** с криптографической подписью. Это сделано для безопасности:
+
+1. 🔒 **Приватный ключ остается локально** - никогда не передается в API
+2. ✅ **Криптографическая подпись** - доказывает, что ордер создан владельцем ключа
+3. 🔗 **Проверка на блокчейне** - подпись проверяется при исполнении ордера
+4. 📝 **Правильные расчеты** - SDK правильно рассчитывает `nonce`, `salt`, `hash`, `makerAmount`, `takerAmount` и другие поля
+5. 🛡️ **Защита от подделки** - API не может создать ордер от вашего имени без вашей подписи
+
+SDK строит структуру ордера и подписывает его локально, затем вы отправляете подписанный ордер в API.
+
+**Процесс размещения:**
+1. Вызываем `build_and_sign_limit_order(...)` - SDK строит и подписывает ордер локально
+2. Вызываем `api_client.place_order(order, price_per_share, ...)` - отправляем подписанный ордер в API
 
 ### Изменения в балансах
 
-- **Старое API:** `get_my_balances()` - через REST API, возвращает все балансы
+- **Старое API:** `get_my_balances()` - возвращал все балансы
 - **Новое API:** 
-  - `get_usdt_balance(order_builder)` - через SDK (on-chain чтение)
-    - Требует `OrderBuilder` из `predict_sdk`
-    - Возвращает баланс USDT в wei (int)
-    - Более актуальные данные (читает из блокчейна)
-  - `get_positions(first, after)` - через REST API, возвращает позиции пользователя
-    - Альтернатива для получения информации о позициях
+  - `get_usdt_balance(order_builder)` - баланс USDT (on-chain чтение через SDK)
+  - `get_positions(first, after)` - позиции пользователя (REST API, требует JWT)
+  - `get_account()` - информация об аккаунте (REST API, требует JWT)
 
 ### Изменения в enable_trading
 
@@ -826,11 +418,8 @@ if response.errno == 0:
 
 **Новый код:**
 ```python
-from bot.predict_api import PredictAPIClient
-
-api_client = PredictAPIClient(api_key, wallet_address, private_key)
 market_data = await api_client.get_market(market_id=market_id)
-# market_data уже словарь или None
+# market_data - это словарь с данными рынка напрямую (без обертки response)
 ```
 
 #### Пример 2: Получение orderbook
@@ -839,16 +428,14 @@ market_data = await api_client.get_market(market_id=market_id)
 ```python
 response = client.get_orderbook(token_id=token_id)
 if response.errno == 0:
-    orderbook = response.result
-    bids = orderbook.bids  # Объекты с полями price, size
+    orderbook = response.result.data
 ```
 
 **Новый код:**
 ```python
 orderbook = await api_client.get_orderbook(market_id=market_id)
-if orderbook:
-    bids = orderbook['bids']  # [[price, size], ...]
-    asks = orderbook['asks']  # [[price, size], ...]
+# orderbook = {'asks': [[price, size], ...], 'bids': [[price, size], ...]}
+# price и size в формате wei (нужно делить на 1e18)
 ```
 
 #### Пример 3: Размещение ордера
@@ -856,61 +443,54 @@ if orderbook:
 **Старый код:**
 ```python
 client.enable_trading()  # Вызывалось перед каждым ордером
-order_data = PlaceOrderDataInput(...)
-result = client.place_order(order_data, check_approval=True)
+response = client.place_order(...)
 ```
 
 **Новый код:**
 ```python
-from bot.predict_api.sdk_operations import build_and_sign_limit_order, set_approvals
-from predict_sdk import OrderBuilder, Side, ChainId, OrderBuilderOptions
+from bot.predict_api.sdk_operations import build_and_sign_limit_order
+from predict_sdk import Side
 
-# 1. Установить approvals (ОДИН РАЗ на кошелек, не перед каждым ордером!)
-# Вызвать один раз при инициализации бота/кошелька
-await set_approvals(order_builder, is_yield_bearing=False)
-
-# 2. Построить и подписать ордер (можно вызывать многократно)
-signed_order = await build_and_sign_limit_order(
+# Шаг 1: Построить и подписать ордер через SDK
+signed_order_data = await build_and_sign_limit_order(
     order_builder=order_builder,
     side=Side.BUY,
-    token_id=token_id,
-    price_per_share_wei=price_wei,
-    quantity_wei=quantity_wei,
-    fee_rate_bps=fee_rate_bps,
-    is_neg_risk=is_neg_risk,
-    is_yield_bearing=is_yield_bearing
+    token_id="0x...",
+    price_per_share_wei=500000000000000000,  # 0.5 USDT в wei
+    quantity_wei=10000000000000000000,  # 10 shares в wei
+    fee_rate_bps=100,
+    is_neg_risk=False,
+    is_yield_bearing=False
 )
 
-# 3. Разместить ордер (можно вызывать многократно, approvals уже установлены)
+# Шаг 2: Разместить ордер через REST API
 result = await api_client.place_order(
-    order=signed_order['order'],
-    price_per_share=signed_order['pricePerShare'],
+    order=signed_order_data['order'],
+    price_per_share=signed_order_data['pricePerShare'],
     strategy="LIMIT"
 )
 ```
 
-#### Пример 4: Отмена ордеров
+#### Пример 4: Отмена ордера
 
 **Старый код:**
 ```python
-result = client.cancel_orders_batch(order_ids)
+response = client.cancel_order(order_id=order_id)
 ```
 
-**Новый код (off-chain, не требует газа):**
+**Новый код:**
 ```python
-result = await api_client.cancel_orders(order_ids=order_ids)
+# Off-chain отмена (рекомендуется для большинства случаев)
+result = await api_client.cancel_orders(order_ids=[order_api_id])
 # result = {'success': bool, 'removed': [...], 'noop': [...]}
-```
 
-**Новый код (on-chain, требует газа, рекомендуется для sync_orders.py):**
-```python
+# Или on-chain отмена (для критичных случаев)
 from bot.predict_api.sdk_operations import cancel_orders_via_sdk
-
 result = await cancel_orders_via_sdk(
     order_builder=order_builder,
-    orders=orders,  # Список ордеров из API
-    is_neg_risk=is_neg_risk,
-    is_yield_bearing=is_yield_bearing
+    orders=[order_data],
+    is_neg_risk=False,
+    is_yield_bearing=False
 )
 ```
 
@@ -941,10 +521,129 @@ orders = response.result.list
 **Новый код:**
 ```python
 orders, cursor = await api_client.get_my_orders(
-    first=10,
-    after=None,  # Для первой страницы
-    status="OPEN"  # или None для всех
+    first=10,         # Количество ордеров
+    after=None,       # Cursor для пагинации (None = первые ордера)
+    status="OPEN"     # Фильтр по статусу: "OPEN", "FILLED" или None (все статусы)
 )
 # Для следующей страницы: after=cursor
 ```
 
+---
+
+## Текущий статус миграции (обновлено)
+
+### ✅ Завершенные этапы
+
+1. **Создание нового API клиента** ✅
+   - ✅ Реализован `PredictAPIClient` в `bot/predict_api/client.py`
+   - ✅ Реализованы все REST API методы согласно OpenAPI спецификации
+   - ✅ Реализована автоматическая JWT аутентификация с обновлением токена
+   - ✅ Реализована обработка ошибок и логирование
+
+2. **Создание SDK операций** ✅
+   - ✅ Реализованы функции в `bot/predict_api/sdk_operations.py`:
+     - `get_usdt_balance()` - получение баланса USDT
+     - `build_and_sign_limit_order()` - построение и подпись LIMIT ордеров
+     - `cancel_orders_via_sdk()` - on-chain отмена ордеров
+     - `set_approvals()` - установка approvals для токенов
+
+3. **Миграция регистрации пользователей** ✅
+   - ✅ `bot/start_router.py` - полностью мигрирован на новое API
+   - ✅ Использует `PredictAPIClient` для проверки подключения
+   - ✅ Использует `get_usdt_balance()` для отображения баланса
+   - ✅ Убрано `set_approvals` из регистрации (выполняется автоматически при первом ордере)
+   - ✅ Обновлены сообщения с инструкциями по получению данных
+
+4. **Миграция управления ордерами** ✅
+   - ✅ `bot/orders_dialog.py` - полностью мигрирован на новое API
+   - ✅ Использует `get_order_by_id(order_hash)` для получения ордеров
+   - ✅ Использует `cancel_orders([order_api_id])` для off-chain отмены
+   - ✅ Использует `order_api_id` из БД вместо запроса к API
+
+5. **Миграция размещения ордеров** ✅
+   - ✅ `bot/market_router.py` - полностью мигрирован на новое API
+   - ✅ Использует `build_and_sign_limit_order()` + `place_order()` для размещения
+   - ✅ Использует `get_limit_order_amounts` из SDK для расчета сумм
+   - ✅ Округляет `quantity_wei` до целого числа shares
+   - ✅ Сохраняет `order_hash` и `order_api_id` в БД
+
+6. **Миграция синхронизации ордеров** ✅
+   - ✅ `bot/sync_orders.py` - полностью мигрирован на новое API
+   - ✅ Использует `get_orderbook(market_id)` для получения цен
+   - ✅ Использует `get_order_by_id(order_hash)` для проверки статусов
+   - ✅ Использует `cancel_orders([order_api_id])` для off-chain отмены
+   - ✅ Использует `build_and_sign_limit_order()` + `place_order()` для размещения
+   - ✅ Оптимизировано: `order_api_id` хранится в БД и используется напрямую
+   - ✅ Упрощено: `orders_to_cancel` теперь список `order_api_id` (без hash)
+
+7. **Обновление базы данных** ✅
+   - ✅ Добавлено поле `order_hash` (переименовано из `order_id`) в таблицу `orders`
+   - ✅ Добавлено поле `order_api_id` в таблицу `orders` для off-chain отмены
+   - ✅ Добавлено поле `market_slug` в таблицу `orders` для формирования URL
+   - ✅ Обновлены все функции БД для работы с новыми полями
+   - ✅ Реализована миграция для переименования `order_id` → `order_hash`
+
+8. **Тестирование** ✅
+   - ✅ Обновлены тесты в `tests/test_sync_orders.py` для нового API
+   - ✅ Обновлены тесты в `tests/test_predict_api_client.py`
+   - ✅ Обновлены тесты в `tests/test_sdk_operations.py`
+
+### ⏳ Осталось сделать
+
+1. **Удаление старого кода** ⏳
+   - ⏳ Удалить `bot/client_factory.py` (больше не используется)
+   - ⏳ Удалить `bot/opinion_api_wrapper.py` (больше не используется)
+   - ⏳ Удалить зависимости от `opinion_clob_sdk` из `requirements.txt`
+
+2. **Очистка и оптимизация** ⏳
+   - ⏳ Проверить все импорты на наличие неиспользуемых
+   - ⏳ Обновить документацию в `bot/predict_api/README.md` при необходимости
+   - ⏳ Обновить `DEPLOY.md` при необходимости
+
+### 📊 Статистика миграции
+
+- **Файлы мигрированы:** 4/4 основных файла (100%)
+  - ✅ `bot/start_router.py`
+  - ✅ `bot/orders_dialog.py`
+  - ✅ `bot/market_router.py`
+  - ✅ `bot/sync_orders.py`
+
+- **Файлы для удаления:** 2 файла
+  - ⏳ `bot/client_factory.py` (не используется)
+  - ⏳ `bot/opinion_api_wrapper.py` (не используется)
+
+- **База данных:** ✅ Полностью обновлена
+  - ✅ Поле `order_hash` (было `order_id`)
+  - ✅ Поле `order_api_id` для off-chain отмены
+  - ✅ Поле `market_slug` для URL
+
+### 🔑 Ключевые изменения в архитектуре
+
+1. **Разделение ответственности:**
+   - REST API (`PredictAPIClient`) - для получения данных и off-chain операций
+   - SDK (`OrderBuilder` + `sdk_operations`) - для on-chain операций и подписи ордеров
+
+2. **Оптимизация данных:**
+   - `order_hash` и `order_api_id` сохраняются в БД при создании ордера
+   - `order_api_id` используется напрямую для отмены (без дополнительных запросов к API)
+   - `market_slug` сохраняется для формирования URL
+
+3. **Упрощение кода:**
+   - Убраны промежуточные словари и маппинги
+   - Данные хранятся прямо в объектах списков (`orders_to_cancel`, `orders_to_place`, `price_change_notifications`)
+   - `orders_to_cancel` упрощен до списка `order_api_id` (hash берется из `order_params` при необходимости)
+
+### ⚠️ Важные замечания
+
+1. **Миграция БД:** При первом запуске после обновления будет выполнена миграция:
+   - Переименование `order_id` → `order_hash` в таблице `orders`
+   - Добавление полей `order_api_id` и `market_slug` (если их еще нет)
+
+2. **Обратная совместимость:** Старые ордера в БД могут не иметь `order_api_id`. В этом случае:
+   - При отмене будет использован fallback (запрос к API для получения `order_api_id`)
+   - Рекомендуется обновить старые ордера или дождаться их естественного завершения
+
+3. **Тестирование:** Перед удалением старого кода рекомендуется:
+   - Протестировать все функции бота
+   - Убедиться, что нет ошибок в логах
+   - Проверить работу с существующими данными в БД

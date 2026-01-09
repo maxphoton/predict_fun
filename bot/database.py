@@ -48,9 +48,11 @@ async def init_database():
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL,
-                order_id TEXT NOT NULL,
+                order_hash TEXT NOT NULL,
+                order_api_id TEXT,
                 market_id INTEGER NOT NULL,
                 market_title TEXT,
+                market_slug TEXT,
                 token_id TEXT NOT NULL,
                 token_name TEXT NOT NULL,
                 side TEXT NOT NULL,
@@ -59,7 +61,7 @@ async def init_database():
                 offset_ticks INTEGER NOT NULL,
                 offset_cents REAL NOT NULL,
                 amount REAL NOT NULL,
-                status TEXT DEFAULT 'pending',
+                status TEXT DEFAULT 'OPEN',
                 reposition_threshold_cents REAL DEFAULT 0.5,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
@@ -71,9 +73,9 @@ async def init_database():
             CREATE INDEX IF NOT EXISTS idx_orders_telegram_id ON orders(telegram_id)
         """)
         
-        # Создаем индекс для поиска по order_id
+        # Создаем индекс для поиска по order_hash
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)
+            CREATE INDEX IF NOT EXISTS idx_orders_order_hash ON orders(order_hash)
         """)
         
         # Таблица инвайтов
@@ -118,10 +120,13 @@ async def init_database():
 
 async def migrate_order_statuses():
     """
-    Миграция статусов ордеров: обновляет старые статусы на новые.
-    active -> pending
-    filled -> finished
-    cancelled -> canceled
+    Миграция статусов ордеров: обновляет старые статусы на статусы API.
+    active -> OPEN
+    pending -> OPEN
+    filled -> FILLED
+    finished -> FILLED
+    cancelled -> CANCELLED
+    canceled -> CANCELLED
     
     Также обновляет DEFAULT значение в схеме таблицы, если оно старое.
     """
@@ -137,31 +142,34 @@ async def migrate_order_statuses():
             # Таблица не существует, миграция не нужна
             return
         
-        # Обновляем статусы в существующих записях
+        # Обновляем статусы в существующих записях (старые статусы -> статусы API)
         cursor = await conn.execute("""
             UPDATE orders 
             SET status = CASE 
-                WHEN status = 'active' THEN 'pending'
-                WHEN status = 'filled' THEN 'finished'
-                WHEN status = 'cancelled' THEN 'canceled'
+                WHEN status = 'active' THEN 'OPEN'
+                WHEN status = 'pending' THEN 'OPEN'
+                WHEN status = 'filled' THEN 'FILLED'
+                WHEN status = 'finished' THEN 'FILLED'
+                WHEN status = 'cancelled' THEN 'CANCELLED'
+                WHEN status = 'canceled' THEN 'CANCELLED'
                 ELSE status
             END
-            WHERE status IN ('active', 'filled', 'cancelled')
+            WHERE status IN ('active', 'pending', 'filled', 'finished', 'cancelled', 'canceled')
         """)
         rows_affected = cursor.rowcount
         await conn.commit()
         
         if rows_affected > 0:
-            logger.info(f"Миграция статусов ордеров завершена: обновлено {rows_affected} записей")
+            logger.info(f"Миграция статусов ордеров завершена: обновлено {rows_affected} записей (старые статусы -> статусы API)")
         else:
             logger.debug("Миграция статусов ордеров: нет записей для обновления")
         
         # Примечание: В SQLite нельзя изменить DEFAULT значение существующей колонки.
         # Однако DEFAULT не используется на практике, так как:
-        # 1. В функции save_order() статус всегда передается явно (есть дефолт в Python: 'pending')
-        # 2. В market_router.py статус передается явно: status='pending'
+        # 1. В функции save_order() статус всегда передается явно (есть дефолт в Python: 'OPEN')
+        # 2. В market_router.py статус передается явно: status='OPEN'
         # 3. В INSERT запросе статус всегда указан в VALUES
-        # Поэтому даже если в схеме таблицы остался старый DEFAULT 'active', это не влияет на работу.
+        # Поэтому даже если в схеме таблицы остался старый DEFAULT, это не влияет на работу.
 
 
 async def get_user(telegram_id: int) -> Optional[dict]:
@@ -235,18 +243,19 @@ async def save_user(telegram_id: int, username: Optional[str], wallet_address: s
     logger.info(f"Пользователь {telegram_id} сохранен в базу данных")
 
 
-async def save_order(telegram_id: int, order_id: str, market_id: int, market_title: Optional[str],
-               token_id: str, token_name: str, side: str, current_price: float,
+async def save_order(telegram_id: int, order_hash: str, market_id: int, market_title: Optional[str],
+               market_slug: Optional[str], token_id: str, token_name: str, side: str, current_price: float,
                target_price: float, offset_ticks: int, offset_cents: float, amount: float,
-               status: str = 'pending', reposition_threshold_cents: float = 0.5):
+               status: str = 'OPEN', reposition_threshold_cents: float = 0.5, order_api_id: Optional[str] = None):
     """
     Сохраняет информацию об ордере в базу данных.
     
     Args:
         telegram_id: ID пользователя в Telegram
-        order_id: ID ордера на бирже
+        order_hash: Hash ордера (order.hash, используется для получения ордера через get_order_by_id)
         market_id: ID рынка
         market_title: Название рынка
+        market_slug: Slug рынка для формирования URL (например, "2026-fifa-world-cup-winner")
         token_id: ID токена (YES/NO)
         token_name: Название токена (YES/NO)
         side: Направление ордера (BUY/SELL)
@@ -255,22 +264,23 @@ async def save_order(telegram_id: int, order_id: str, market_id: int, market_tit
         offset_ticks: Отступ в тиках
         offset_cents: Отступ в центах
         amount: Сумма ордера в USDT
-        status: Статус ордера (pending/finished/canceled)
+        status: Статус ордера (OPEN/FILLED/CANCELLED/EXPIRED/INVALIDATED - соответствует статусам API)
         reposition_threshold_cents: Порог отклонения в центах для перестановки ордера
+        order_api_id: ID ордера из API (bigint string, используется для off-chain отмены через cancel_orders)
     """
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute("""
             INSERT INTO orders 
-            (telegram_id, order_id, market_id, market_title, token_id, token_name, 
+            (telegram_id, order_hash, order_api_id, market_id, market_title, market_slug, token_id, token_name, 
              side, current_price, target_price, offset_ticks, offset_cents, amount, status, reposition_threshold_cents)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            telegram_id, order_id, market_id, market_title, token_id, token_name,
+            telegram_id, order_hash, order_api_id, market_id, market_title, market_slug, token_id, token_name,
             side, current_price, target_price, offset_ticks, offset_cents, amount, status, reposition_threshold_cents
         ))
         
         await conn.commit()
-    logger.info(f"Ордер {order_id} сохранен в базу данных для пользователя {telegram_id}")
+    logger.info(f"Ордер {order_hash} сохранен в базу данных для пользователя {telegram_id}")
 
 
 async def get_user_orders(telegram_id: int, status: Optional[str] = None) -> list:
@@ -279,13 +289,13 @@ async def get_user_orders(telegram_id: int, status: Optional[str] = None) -> lis
     
     Args:
         telegram_id: ID пользователя в Telegram
-        status: Фильтр по статусу (pending/finished/canceled). Если None, возвращает все ордера.
+        status: Фильтр по статусу (OPEN/FILLED/CANCELLED/EXPIRED/INVALIDATED). Если None, возвращает все ордера.
     
     Returns:
         list: Список словарей с данными ордеров
     """
     # Явно указываем колонки в правильном порядке
-    columns = ['id', 'telegram_id', 'order_id', 'market_id', 'market_title', 
+    columns = ['id', 'telegram_id', 'order_hash', 'order_api_id', 'market_id', 'market_title', 'market_slug',
                'token_id', 'token_name', 'side', 'current_price', 'target_price',
                'offset_ticks', 'offset_cents', 'amount', 'status', 'reposition_threshold_cents', 'created_at']
     
@@ -313,26 +323,26 @@ async def get_user_orders(telegram_id: int, status: Optional[str] = None) -> lis
     return orders
 
 
-async def get_order_by_id(order_id: str) -> Optional[dict]:
+async def get_order_by_hash(order_hash: str) -> Optional[dict]:
     """
-    Получает ордер по его ID из базы данных.
+    Получает ордер по его hash из базы данных.
     
     Args:
-        order_id: ID ордера на бирже
+        order_hash: Hash ордера (order.hash)
     
     Returns:
         dict: Словарь с данными ордера или None, если ордер не найден
     """
     # Явно указываем колонки в правильном порядке
-    columns = ['id', 'telegram_id', 'order_id', 'market_id', 'market_title', 
+    columns = ['id', 'telegram_id', 'order_hash', 'order_api_id', 'market_id', 'market_title', 'market_slug',
                'token_id', 'token_name', 'side', 'current_price', 'target_price',
                'offset_ticks', 'offset_cents', 'amount', 'status', 'reposition_threshold_cents', 'created_at']
     
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(f"""
             SELECT {', '.join(columns)} FROM orders 
-            WHERE order_id = ?
-        """, (order_id,)) as cursor:
+            WHERE order_hash = ?
+        """, (order_hash,)) as cursor:
             row = await cursor.fetchone()
     
     if not row:
@@ -342,44 +352,52 @@ async def get_order_by_id(order_id: str) -> Optional[dict]:
     return order_dict
 
 
-async def update_order_status(order_id: str, status: str):
+async def update_order_status(order_hash: str, status: str):
     """
     Обновляет статус ордера в базе данных.
     
     Args:
-        order_id: ID ордера на бирже
-        status: Новый статус (pending/finished/canceled)
+        order_hash: Hash ордера
+        status: Новый статус (OPEN/FILLED/CANCELLED/EXPIRED/INVALIDATED - соответствует статусам API)
     """
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute("""
             UPDATE orders 
             SET status = ?
-            WHERE order_id = ?
-        """, (status, order_id))
+            WHERE order_hash = ?
+        """, (status, order_hash))
         
         await conn.commit()
-    logger.info(f"Статус ордера {order_id} обновлен на {status}")
+    logger.info(f"Статус ордера {order_hash} обновлен на {status}")
 
 
-async def update_order_in_db(old_order_id: str, new_order_id: str, new_current_price: float, new_target_price: float):
+async def update_order_in_db(old_order_hash: str, new_order_hash: str, new_current_price: float, new_target_price: float, new_order_api_id: Optional[str] = None):
     """
-    Обновляет order_id и цену ордера в БД.
+    Обновляет order_hash, order_api_id и цену ордера в БД.
     
     Args:
-        old_order_id: Старый ID ордера
-        new_order_id: Новый ID ордера
+        old_order_hash: Старый hash ордера
+        new_order_hash: Новый hash ордера
         new_current_price: Новая текущая цена
         new_target_price: Новая целевая цена
+        new_order_api_id: Новый ID ордера из API (bigint string) для off-chain отмены
     """
     async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute("""
-            UPDATE orders 
-            SET order_id = ?, current_price = ?, target_price = ?
-            WHERE order_id = ?
-        """, (new_order_id, new_current_price, new_target_price, old_order_id))
+        if new_order_api_id:
+            await conn.execute("""
+                UPDATE orders 
+                SET order_hash = ?, order_api_id = ?, current_price = ?, target_price = ?
+                WHERE order_hash = ?
+            """, (new_order_hash, new_order_api_id, new_current_price, new_target_price, old_order_hash))
+        else:
+            await conn.execute("""
+                UPDATE orders 
+                SET order_hash = ?, current_price = ?, target_price = ?
+                WHERE order_hash = ?
+            """, (new_order_hash, new_current_price, new_target_price, old_order_hash))
         
         await conn.commit()
-    logger.info(f"Обновлен ордер {old_order_id} -> {new_order_id} в БД")
+    logger.info(f"Обновлен ордер {old_order_hash} -> {new_order_hash} в БД")
 
 
 async def get_all_users():

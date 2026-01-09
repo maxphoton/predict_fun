@@ -33,7 +33,7 @@ from database import (
 from invites import get_unused_invites, get_invites_statistics
 from spam_protection import AntiSpamMiddleware
 from orders_dialog import orders_dialog, OrdersSG
-# from sync_orders import async_sync_all_orders
+from sync_orders import async_sync_all_orders
 from logger_config import setup_root_logger
 from start_router import start_router
 from market_router import market_router
@@ -415,8 +415,8 @@ async def main():
     dp.include_router(router)  # Main router (orders, get_db, etc.)
     
     # Запускаем фоновую задачу синхронизации ордеров
-    # asyncio.create_task(background_sync_task())
-    # logger.info("Background sync task started")
+    asyncio.create_task(background_sync_task())
+    logger.info("Background sync task started")
     
     # Отправляем сообщение админу при старте (если указан)
     if settings.admin_telegram_id and settings.admin_telegram_id != 0:

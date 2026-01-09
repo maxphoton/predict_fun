@@ -7,15 +7,60 @@ SDK предоставляет методы для:
 - Получения баланса USDT (on-chain)
 - Отмены ордеров через контракты (on-chain транзакции)
 - Построения и подписи ордеров (затем размещение через REST API)
+- Размещения ордеров (общий метод для использования в разных местах)
 """
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Callable
 
 from predict_sdk import OrderBuilder, Side, BuildOrderInput, LimitHelperInput, CancelOrdersOptions
 
+# Константа для размера тика (совпадает с config.TICK_SIZE)
+TICK_SIZE = 0.001
+
 logger = logging.getLogger(__name__)
+
+
+def calculate_new_target_price(
+    new_current_price: float,
+    side: str,
+    offset_ticks: int,
+    tick_size: float = TICK_SIZE
+) -> float:
+    """
+    Вычисляет новую целевую цену с использованием сохраненного offset_ticks.
+    
+    Использует ту же логику, что и при создании ордера.
+    
+    Args:
+        new_current_price: Новая текущая цена рынка
+        side: BUY или SELL
+        offset_ticks: Отступ в тиках (из БД)
+        tick_size: Размер тика (по умолчанию 0.001)
+    
+    Returns:
+        Новая целевая цена
+    """
+    # Вычисляем целевую цену так же, как при создании ордера
+    if side == "BUY":
+        target = new_current_price - offset_ticks * tick_size
+    else:  # SELL
+        target = new_current_price + offset_ticks * tick_size
+    
+    # Ограничиваем диапазоном 0.001 - 0.999 (требования API)
+    MIN_PRICE = 0.001
+    MAX_PRICE = 0.999
+    target = max(MIN_PRICE, min(MAX_PRICE, target))
+    target = round(target, 3)
+    
+    # Проверяем, что после округления цена все еще в допустимом диапазоне
+    if target < MIN_PRICE:
+        target = MIN_PRICE
+    elif target > MAX_PRICE:
+        target = MAX_PRICE
+    
+    return target
 
 
 async def get_usdt_balance(order_builder: OrderBuilder) -> int:
@@ -402,4 +447,130 @@ async def set_approvals(
             'transactions': [],
             'cause': str(e)
         }
+
+
+async def place_single_order(
+    api_client,
+    order_builder: OrderBuilder,
+    token_id: str,
+    side: Side,
+    price: float,
+    amount: float,
+    market: Optional[Dict] = None,
+    market_id: Optional[int] = None
+) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """
+    Размещает один ордер на рынке (SDK + REST API).
+    
+    Общий метод для размещения ордеров, используется в market_router.py и sync_orders.py.
+    
+    Args:
+        api_client: Экземпляр PredictAPIClient
+        order_builder: Экземпляр OrderBuilder для SDK операций
+        token_id: ID токена (onChainId из outcomes)
+        side: Направление ордера (Side.BUY или Side.SELL)
+        price: Цена за акцию (0.001 - 0.999) - должна быть уже пересчитана, если нужно
+        amount: Сумма ордера в USDT
+        market: Словарь с данными рынка (опционально, для получения feeRateBps, isNegRisk, isYieldBearing)
+        market_id: ID рынка (опционально, используется если market не передан и нужно получить данные рынка)
+    
+    Returns:
+        Tuple[bool, Optional[str], Optional[str], Optional[str]]: 
+        (success, order_hash, order_api_id, error_message)
+        - success: True если ордер успешно размещен
+        - order_hash: Hash ордера (используется как order_id в БД)
+        - order_api_id: ID ордера из API (bigint string, используется для off-chain отмены)
+        - error_message: Сообщение об ошибке или None
+    """
+    try:
+        # Валидация цены
+        price_rounded = round(price, 3)  # API requires max 3 decimal places
+        MIN_PRICE = 0.001
+        MAX_PRICE = 0.999
+        
+        if price_rounded < MIN_PRICE:
+            error_msg = f"Price {price_rounded} is less than minimum {MIN_PRICE}"
+            logger.error(error_msg)
+            return False, None, None, error_msg
+        
+        if price_rounded > MAX_PRICE:
+            error_msg = f"Price {price_rounded} is greater than maximum {MAX_PRICE}"
+            logger.error(error_msg)
+            return False, None, None, error_msg
+        
+        # Получаем данные рынка для fee_rate_bps, is_neg_risk, is_yield_bearing
+        if not market and market_id:
+            try:
+                market = await api_client.get_market(market_id=market_id)
+            except Exception as e:
+                logger.warning(f"Не удалось получить данные рынка {market_id}: {e}")
+        
+        if not market:
+            # Используем значения по умолчанию
+            fee_rate_bps = 100  # 1%
+            is_neg_risk = False
+            is_yield_bearing = False
+        else:
+            fee_rate_bps = market.get('feeRateBps', 100)
+            is_neg_risk = market.get('isNegRisk', False)
+            is_yield_bearing = market.get('isYieldBearing', False)
+        
+        # Преобразуем цену в wei
+        price_per_share_wei = int(price_rounded * 1e18)
+        
+        # Преобразуем amount (USDT) в quantity_wei (количество акций)
+        quantity = amount / price_rounded
+        quantity_rounded = round(quantity)  # Округляем до целого числа акций
+        quantity_wei = int(quantity_rounded * 1e18)
+        
+        # Шаг 1: Построить и подписать ордер через SDK
+        signed_order_data = await build_and_sign_limit_order(
+            order_builder=order_builder,
+            side=side,
+            token_id=token_id,
+            price_per_share_wei=price_per_share_wei,
+            quantity_wei=quantity_wei,
+            fee_rate_bps=fee_rate_bps,
+            is_neg_risk=is_neg_risk,
+            is_yield_bearing=is_yield_bearing
+        )
+        
+        if not signed_order_data:
+            error_msg = "Failed to build and sign order"
+            logger.error(error_msg)
+            return False, None, None, error_msg
+        
+        # Шаг 2: Разместить ордер через REST API
+        logger.info(f"Placing order with pricePerShare={signed_order_data.get('pricePerShare')}")
+        logger.debug(f"Order data: {signed_order_data.get('order', {})}")
+        
+        result = await api_client.place_order(
+            order=signed_order_data['order'],
+            price_per_share=signed_order_data['pricePerShare'],
+            strategy="LIMIT"
+        )
+        
+        logger.info(f"Place order result: {result}")
+        
+        if result and result.get('code') == 'OK':
+            # Возвращаем orderHash и orderId
+            order_hash = signed_order_data.get('hash') or result.get('orderHash')
+            order_api_id = result.get('orderId')  # ID ордера для off-chain отмены
+            if order_hash:
+                return True, order_hash, order_api_id, None
+            else:
+                error_msg = "orderHash not found in response. Cannot save order to database."
+                logger.error(f"Error placing order: {error_msg}. Result: {result}")
+                return False, None, None, error_msg
+        else:
+            # Извлекаем описание ошибки из ответа API
+            error_description = result.get('error', {}).get('description') if result else None
+            error_msg = error_description or result.get('message', 'Unknown error') if result else 'No response from API'
+            logger.error(f"Error placing order: {error_msg}. Full result: {result}")
+            return False, None, None, error_msg
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error placing order: {error_msg}", exc_info=True)
+        return False, None, None, error_msg
 

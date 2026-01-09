@@ -20,7 +20,7 @@ from predict_sdk import OrderBuilder, Side, OrderBuilderOptions
 
 from database import get_user, save_order
 from predict_api import PredictAPIClient
-from predict_api.sdk_operations import build_and_sign_limit_order, get_usdt_balance
+from predict_api.sdk_operations import place_single_order, get_usdt_balance
 from predict_api.auth import get_chain_id
 from config import TICK_SIZE
 
@@ -270,127 +270,6 @@ async def check_usdt_balance(order_builder: OrderBuilder, required_amount: float
         return False, 0.0
 
 
-async def place_order(
-    api_client: PredictAPIClient,
-    order_builder: OrderBuilder,
-    order_params: dict
-) -> Tuple[bool, Optional[str], Optional[str]]:
-    """
-    Places an order on the market using new API (SDK + REST API).
-    
-    Args:
-        api_client: PredictAPIClient instance
-        order_builder: OrderBuilder instance for SDK operations
-        order_params: Dictionary with order parameters:
-            - 'market': dict - market data (для получения feeRateBps, isNegRisk, isYieldBearing)
-            - 'token_id': str - token ID (onChainId из outcomes)
-            - 'side': str - "BUY" or "SELL" (преобразуется в Side.BUY/SELL)
-            - 'price': float - price per share (0.001 - 0.999)
-            - 'amount': float - amount in USDT
-    
-    Returns:
-        Tuple[bool, Optional[str], Optional[str]]: (success, order_hash, error_message)
-        order_hash используется как order_id в БД
-    """
-    try:
-        price = float(order_params['price'])
-        price_rounded = round(price, 3)  # API requires max 3 decimal places
-        
-        # Additional validation: API requires range 0.001 - 0.999 (inclusive)
-        MIN_PRICE = 0.001
-        MAX_PRICE = 0.999
-        
-        if price_rounded < MIN_PRICE:
-            error_msg = f"Price {price_rounded} is less than minimum {MIN_PRICE}"
-            logger.error(error_msg)
-            return False, None, error_msg
-        
-        if price_rounded > MAX_PRICE:
-            error_msg = f"Price {price_rounded} is greater than maximum {MAX_PRICE}"
-            logger.error(error_msg)
-            return False, None, error_msg
-        
-        # Получаем данные из market
-        market = order_params.get('market', {})
-        fee_rate_bps = market.get('feeRateBps', 100)  # По умолчанию 100 bps (1%)
-        is_neg_risk = market.get('isNegRisk', False)
-        is_yield_bearing = market.get('isYieldBearing', False)
-        
-        # Преобразуем side в Side enum
-        # order_params['side'] всегда строка "BUY" или "SELL" (новое API)
-        side_str = order_params['side'].upper()
-        side = Side.BUY if side_str == "BUY" else Side.SELL
-        
-        # Преобразуем цену в wei
-        price_per_share_wei = int(price_rounded * 1e18)
-        
-        # Преобразуем amount (USDT) в quantity_wei (количество акций)
-        # quantity = amount_usdt / price_per_share
-        amount_usdt = float(order_params['amount'])
-        quantity = amount_usdt / price_rounded
-        # Округляем количество акций до целого числа
-        quantity_rounded = round(quantity)
-        quantity_wei = int(quantity_rounded * 1e18)
-        
-        # Шаг 1: Построить и подписать ордер через SDK
-        signed_order_data = await build_and_sign_limit_order(
-            order_builder=order_builder,
-            side=side,
-            token_id=order_params['token_id'],
-            price_per_share_wei=price_per_share_wei,
-            quantity_wei=quantity_wei,
-            fee_rate_bps=fee_rate_bps,
-            is_neg_risk=is_neg_risk,
-            is_yield_bearing=is_yield_bearing
-        )
-        
-        if not signed_order_data:
-            error_msg = "Failed to build and sign order"
-            logger.error(error_msg)
-            return False, None, error_msg
-        
-        # Шаг 2: Разместить ордер через REST API
-        # Логируем данные для отладки
-        logger.info(f"Placing order with pricePerShare={signed_order_data.get('pricePerShare')}")
-        logger.debug(f"Order data: {signed_order_data.get('order', {})}")
-        
-        result = await api_client.place_order(
-            order=signed_order_data['order'],
-            price_per_share=signed_order_data['pricePerShare'],
-            strategy="LIMIT"
-        )
-        
-        # Логируем результат
-        logger.info(f"Place order result: {result}")
-        
-        if result and result.get('code') == 'OK':
-            # Возвращаем orderHash как order_id (используется в БД)
-            # Важно: order_hash используется в orders_dialog.py для получения ордера
-            # через api_client.get_order_by_id(order_hash=order_id)
-            # orderHash должен быть доступен либо из signed_order_data (локально вычисленный),
-            # либо из result (ответ API)
-            order_hash = signed_order_data.get('hash') or result.get('orderHash')
-            if order_hash:
-                return True, order_hash, None
-            else:
-                # Если hash недоступен - это ошибка, так как orders_dialog.py требует hash
-                # Согласно документации, result должен содержать 'orderHash', но если его нет,
-                # это означает проблему с API или SDK
-                error_msg = "orderHash not found in response. Cannot save order to database."
-                logger.error(f"Error placing order: {error_msg}. Result: {result}")
-                return False, None, error_msg
-        else:
-            # Извлекаем описание ошибки из ответа API
-            # Структура: {"success":false,"error":{"description":"..."},"message":"..."}
-            error_description = result.get('error', {}).get('description') if result else None
-            error_msg = error_description or result.get('message', 'Unknown error') if result else 'No response from API'
-            logger.error(f"Error placing order: {error_msg}. Full result: {result}")
-            return False, None, error_msg
-            
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error placing order: {error_msg}", exc_info=True)
-        return False, None, error_msg
 
 
 # ============================================================================
@@ -546,8 +425,8 @@ Expected format: https://predict.fun/market/{slug}""",
     else:
         category_display = slug
     
-    # Save market list, API client and OrderBuilder to state
-    await state.update_data(markets=market_list, api_client=api_client, order_builder=order_builder)
+    # Save market list, API client, OrderBuilder and slug to state
+    await state.update_data(markets=market_list, api_client=api_client, order_builder=order_builder, slug=slug)
     
     # Create keyboard for market selection
     builder = InlineKeyboardBuilder()
@@ -654,7 +533,6 @@ Possible reasons:
     
     await message.answer(
         f"""📋 Market Found: {market_title}
-📊 Market ID: {market_id}
 
 {market_info_text}
 
@@ -1262,18 +1140,22 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    order_params = {
-        'market': market,  # Для получения feeRateBps, isNegRisk, isYieldBearing
-        'token_id': data['token_id'],
-        'side': data['order_side'],  # "BUY" or "SELL" (строка)
-        'price': str(data['target_price']),
-        'amount': data['amount'],
-        'token_name': data['token_name']
-    }
-    
     await callback.message.edit_text("""🔄 Placing order...""")
     
-    success, order_id, error_message = await place_order(api_client, order_builder, order_params)
+    # Преобразуем side в Side enum
+    side_str = data['order_side'].upper()
+    side = Side.BUY if side_str == "BUY" else Side.SELL
+    
+    # Используем общий метод размещения ордера
+    success, order_hash, order_api_id, error_message = await place_single_order(
+        api_client=api_client,
+        order_builder=order_builder,
+        token_id=data['token_id'],
+        side=side,
+        price=float(data['target_price']),
+        amount=float(data['amount']),
+        market=market
+    )
     
     if success:
         # Save order to database
@@ -1283,6 +1165,8 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
             market = data.get('market', {})
             # Новое API: market - это словарь с полем 'title'
             market_title = market.get('title') if market else None
+            # Получаем slug из state (был сохранен при обработке URL)
+            market_slug = data.get('slug')
             token_id = data['token_id']
             token_name = data['token_name']
             side = data['direction']  # BUY or SELL
@@ -1295,13 +1179,15 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
             reposition_threshold_cents = data.get('reposition_threshold_cents', 0.5)
             
             # Сохраняем ордер в базу данных
-            # order_id здесь - это order_hash (хэш ордера), который используется
-            # в orders_dialog.py для получения ордера через api_client.get_order_by_id(order_hash=order_id)
+            # order_hash - это hash ордера (order.hash) для получения ордера через get_order_by_id
+            # order_api_id сохраняется отдельно для off-chain отмены через cancel_orders
             await save_order(
                 telegram_id=telegram_id,
-                order_id=order_id,  # Это order_hash, не orderId!
+                order_hash=order_hash,  # Hash ордера (order.hash)
+                order_api_id=order_api_id,  # ID ордера из API (bigint string) для off-chain отмены
                 market_id=market_id,
                 market_title=market_title,
+                market_slug=market_slug,
                 token_id=token_id,
                 token_name=token_name,
                 side=side,
@@ -1310,10 +1196,10 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
                 offset_ticks=offset_ticks,
                 offset_cents=offset_cents,
                 amount=amount,
-                status='pending',
+                status='OPEN',
                 reposition_threshold_cents=reposition_threshold_cents
             )
-            logger.info(f"Order {order_id} successfully saved to DB for user {telegram_id}")
+            logger.info(f"Order {order_hash} (API ID: {order_api_id}) successfully saved to DB for user {telegram_id}")
         except Exception as e:
             logger.error(f"Error saving order to DB: {e}")
         
@@ -1326,7 +1212,7 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
 • Amount: {data['amount']} USDT
 • Offset: {offset_cents:.2f}¢
 • Reposition threshold: {reposition_threshold_cents:.2f}¢
-• Order ID: <code>{order_id}</code>"""
+• Order Hash: <code>{order_hash}</code>"""
         )
     else:
         error_text = f"""❌ <b>Failed to place order</b>

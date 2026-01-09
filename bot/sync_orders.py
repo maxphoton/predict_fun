@@ -14,14 +14,14 @@ PROCESS OVERVIEW:
 2. ORDER STATUS CHECK (process_user_orders):
    For each active order from database:
    a. Checks order status via API (get_order_by_id):
-      - Compares database status ('pending') with API status
-      - If status changed from 'pending' to 'Finished' (finished):
-        * Updates database status to 'finished'
+      - Compares database status ('OPEN') with API status
+      - If status changed from 'OPEN' to 'FILLED':
+        * Updates database status to 'FILLED'
         * Sends notification to user with order details from API (price, market link, etc.)
-        * Skips further processing (order is no longer pending)
-      - If status changed from 'pending' to 'Canceled' (canceled):
-        * Updates database status to 'canceled'
-        * Skips further processing (no notification sent for canceled orders)
+        * Skips further processing (order is no longer active)
+      - If status changed from 'OPEN' to 'CANCELLED', 'EXPIRED', or 'INVALIDATED':
+        * Updates database status to the API status (CANCELLED, EXPIRED, or INVALIDATED)
+        * Skips further processing (no notification sent for canceled/expired/invalidated orders)
       - If status check fails, continues with normal processing (graceful degradation)
 
 3. ORDER PROCESSING (process_user_orders):
@@ -49,17 +49,16 @@ PROCESS OVERVIEW:
    - Notifications sent BEFORE cancellation/placement to inform user immediately
 
 5. ORDER CANCELLATION:
-   - Cancels old orders in batch via API (only orders that need repositioning)
+   - Cancels old orders via API (off-chain, removal from orderbook)
    - BATCHES ARE FORMED PER USER: all orders for one user are in the same batch
-   - Checks success via result_data.errno == 0 from API response (not just success flag)
+   - Checks success via result['success'] and result['removed'] from API response
    - Logs each cancellation with User ID and Market ID for debugging
    - If ANY order fails to cancel, skips placement for ALL orders (safety check)
 
 6. ORDER PLACEMENT:
-   - Places new orders in batch ONLY if ALL old orders were successfully cancelled
+   - Places new orders sequentially ONLY if ALL old orders were successfully cancelled
    - BATCHES ARE FORMED PER USER: all orders for one user are in the same batch
-   - Checks success via result_data.errno == 0 (not just success=True)
-     According to API docs: result['success'] = True but result['result'].errno != 0 means failure
+   - Uses SDK + REST API: build_and_sign_limit_order + place_order
    - Logs each placement with User ID and Market ID for debugging
    - If placement fails for specific order (e.g., insufficient balance):
      * Sends error notification to user for THAT specific order (not for entire batch)
@@ -67,8 +66,8 @@ PROCESS OVERVIEW:
      * Other orders in batch continue to be processed
 
 7. DATABASE UPDATE:
-   - Updates database ONLY for successfully placed orders (errno == 0)
-   - Updates: order_id (old -> new), current_price, target_price
+   - Updates database ONLY for successfully placed orders
+   - Updates: order_id (old hash -> new hash), current_price, target_price
    - Sends success notification to user after database update
    - If placement failed, database is NOT updated (old order remains in DB as cancelled)
 
@@ -82,8 +81,7 @@ KEY FEATURES:
 - Uses reposition_threshold_cents from database (user-configurable per order, default 0.5 cents)
 - Skips repositioning when change < threshold (saves API calls and gas fees)
 - Sends price change notifications ONLY when order will be repositioned (reduces notification spam)
-- Validates cancellation via errno == 0 (not just success flag)
-- Validates placement via errno == 0 (handles cases where success=True but errno != 0)
+- Validates cancellation via result['success'] and result['removed']
 - Places new orders only if ALL old orders cancelled successfully (safety check)
 - Updates database only after successful placement (data consistency)
 - Sends error notifications per order if placement fails (user awareness)
@@ -91,10 +89,10 @@ KEY FEATURES:
 - Performance monitoring: Logs start time, end time, and duration for each user's processing
 - Visual formatting: boxed headers for start/end of sync task
 - Runs as background task in bot, synchronizing orders every 60 seconds
-- All blocking operations (API calls) wrapped in asyncio.to_thread() for non-blocking execution
+- All blocking operations (API calls) are async
 - List consistency check: validates that cancellation and placement lists have same length
 - Order identification: uses index matching between place_results and orders_to_place to identify failed orders
-- Uses status constants (ORDER_STATUS_FINISHED, ORDER_STATUS_CANCELED) from opinion_api_wrapper for consistency
+- Uses status constants (ORDER_STATUS_FILLED, ORDER_STATUS_CANCELLED) for new API
 
 ARCHITECTURE:
 ============
@@ -106,14 +104,14 @@ ARCHITECTURE:
   * Checks order status via API before processing (get_order_by_id)
   * Updates database and sends notifications for status changes
   * Calculates price changes and determines if repositioning is needed
-- cancel_orders_batch(): Synchronous batch cancellation wrapper
-- place_orders_batch(): Synchronous batch placement wrapper
+- cancel_orders_batch(): Async batch cancellation via API (off-chain)
+- place_orders_batch(): Async batch placement via SDK + REST API
 - send_price_change_notification(): Sends price change notification to user
 - send_order_updated_notification(): Sends success notification after DB update
 - send_order_placement_error_notification(): Sends error notification if placement fails
 - send_order_filled_notification(): Sends notification when order is filled
-  * Uses API order object (not database dict) for accurate data
-  * Includes filled price, market link to root market, and order details
+  * Uses API order dict (not database dict) for accurate data
+  * Includes filled amount, market link, and order details
 """
 import asyncio
 import logging
@@ -122,153 +120,119 @@ import traceback
 from typing import List, Dict, Optional, Tuple
 
 from database import get_user, get_user_orders, get_all_users, update_order_in_db, update_order_status
-from client_factory import create_client, setup_proxy
-from opinion_api_wrapper import get_order_by_id, ORDER_STATUS_FINISHED, ORDER_STATUS_CANCELED
+from predict_api import PredictAPIClient
+from predict_api.sdk_operations import (
+    place_single_order,
+    calculate_new_target_price
+)
+from predict_api.auth import get_chain_id
+from predict_sdk import OrderBuilder, Side, OrderBuilderOptions
 from config import TICK_SIZE
-from opinion_clob_sdk.chain.py_order_utils.model.order import PlaceOrderDataInput
-from opinion_clob_sdk.chain.py_order_utils.model.sides import OrderSide
-from opinion_clob_sdk.chain.py_order_utils.model.order_type import LIMIT_ORDER
 from logger_config import setup_logger
 
 # Настройка логирования
 logger = setup_logger("sync_orders", "sync_orders.log")
 
-# Настраиваем прокси
-setup_proxy()
+# Константы статусов для нового API (соответствуют статусам в API)
+ORDER_STATUS_OPEN = "OPEN"
+ORDER_STATUS_FILLED = "FILLED"
+ORDER_STATUS_CANCELLED = "CANCELLED"
+ORDER_STATUS_EXPIRED = "EXPIRED"
+ORDER_STATUS_INVALIDATED = "INVALIDATED"
 
 
-def get_current_market_price(client, token_id: str, side: str) -> Optional[float]:
+async def get_current_market_price(api_client: PredictAPIClient, market_id: int, side: str, token_name: str) -> Optional[float]:
     """
-    Получает текущую цену рынка для токена.
+    Получает текущую цену рынка для рынка.
     
     Args:
-        client: Клиент PredictDotFun SDK
-        token_id: ID токена (YES или NO)
+        api_client: Клиент Predict.fun API
+        market_id: ID рынка
         side: BUY или SELL - определяет, какую цену брать (best_bid для BUY, best_ask для SELL)
+        token_name: "YES" или "NO" - для определения правильной цены
     
     Returns:
         Текущая цена или None в случае ошибки
     """
     try:
-        response = client.get_orderbook(token_id=token_id)
+        orderbook = await api_client.get_orderbook(market_id=market_id)
         
-        if response.errno != 0:
-            logger.error(f"Ошибка получения orderbook для токена {token_id}: errno={response.errno}")
+        if not orderbook:
+            logger.error(f"Ошибка получения orderbook для рынка {market_id}")
             return None
         
-        orderbook = response.result if not hasattr(response.result, 'data') else response.result.data
-        
-        bids = orderbook.bids if hasattr(orderbook, 'bids') else []
-        asks = orderbook.asks if hasattr(orderbook, 'asks') else []
+        # Новый API возвращает массивы массивов: [[price, size], ...]
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
         
         if side == "BUY":
             # Для BUY берем best_bid (самый высокий бид)
             if bids and len(bids) > 0:
-                # Сортируем биды по убыванию цены
+                # bids - это массив массивов [[price, size], ...]
+                # Берем первый элемент (самый высокий бид) и извлекаем цену
                 bid_prices = []
                 for bid in bids:
-                    if hasattr(bid, 'price'):
+                    if isinstance(bid, list) and len(bid) >= 1:
                         try:
-                            price = float(bid.price)
+                            price = float(bid[0])  # Первый элемент - цена
                             bid_prices.append(price)
                         except (ValueError, TypeError):
                             continue
                 if bid_prices:
-                    return max(bid_prices)  # Самый высокий бид
+                    best_bid = max(bid_prices)
+                    # Если это NO токен, цена NO = 1 - price_yes
+                    if token_name == "NO":
+                        return 1.0 - best_bid
+                    return best_bid
         else:  # SELL
             # Для SELL берем best_ask (самый низкий аск)
             if asks and len(asks) > 0:
-                # Сортируем аски по возрастанию цены
+                # asks - это массив массивов [[price, size], ...]
+                # Берем первый элемент (самый низкий аск) и извлекаем цену
                 ask_prices = []
                 for ask in asks:
-                    if hasattr(ask, 'price'):
+                    if isinstance(ask, list) and len(ask) >= 1:
                         try:
-                            price = float(ask.price)
+                            price = float(ask[0])  # Первый элемент - цена
                             ask_prices.append(price)
                         except (ValueError, TypeError):
                             continue
                 if ask_prices:
-                    return min(ask_prices)  # Самый низкий аск
+                    best_ask = min(ask_prices)
+                    # Если это NO токен, цена NO = 1 - price_yes
+                    if token_name == "NO":
+                        return 1.0 - best_ask
+                    return best_ask
         
-        logger.warning(f"Не удалось определить текущую цену для токена {token_id}, side={side}")
+        logger.warning(f"Не удалось определить текущую цену для рынка {market_id}, side={side}, token={token_name}")
         return None
         
     except Exception as e:
-        logger.error(f"Ошибка при получении текущей цены для токена {token_id}: {e}")
+        logger.error(f"Ошибка при получении текущей цены для рынка {market_id}: {e}")
         return None
 
 
-def calculate_new_target_price(
-    new_current_price: float,
-    side: str,
-    offset_ticks: int,
-    tick_size: float = TICK_SIZE
-) -> float:
-    """
-    Вычисляет новую целевую цену с использованием сохраненного offset_ticks.
-    
-    Использует ту же логику, что и при создании ордера.
-    
-    Args:
-        new_current_price: Новая текущая цена рынка
-        side: BUY или SELL
-        offset_ticks: Отступ в тиках (из БД)
-        tick_size: Размер тика (по умолчанию 0.001)
-    
-    Returns:
-        Новая целевая цена
-    """
-    # Вычисляем целевую цену так же, как при создании ордера
-    if side == "BUY":
-        target = new_current_price - offset_ticks * tick_size
-    else:  # SELL
-        target = new_current_price + offset_ticks * tick_size
-    
-    # Ограничиваем диапазоном 0.001 - 0.999 (требования API)
-    MIN_PRICE = 0.001
-    MAX_PRICE = 0.999
-    target = max(MIN_PRICE, min(MAX_PRICE, target))
-    target = round(target, 3)
-    
-    # Проверяем, что после округления цена все еще в допустимом диапазоне
-    if target < MIN_PRICE:
-        target = MIN_PRICE
-    elif target > MAX_PRICE:
-        target = MAX_PRICE
-    
-    return target
-
-
-async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], List[Dict], List[Dict]]:
+async def process_user_orders(telegram_id: int, api_client: PredictAPIClient, bot=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Обрабатывает ордера пользователя и возвращает списки для отмены и размещения.
     
     Args:
         telegram_id: ID пользователя в Telegram
+        api_client: Клиент Predict.fun API (уже создан)
         bot: Экземпляр aiogram Bot для отправки уведомлений (опционально)
     
     Returns:
-        Tuple: (список order_id для отмены, список параметров новых ордеров, список уведомлений о смещении цены)
+        Tuple: (список order_api_id для отмены, список параметров новых ордеров, список уведомлений о смещении цены)
+        orders_to_cancel: [order_api_id: str, ...] - список ID ордеров для отмены
+        orders_to_place: [{'old_order_hash': str, 'old_order_api_id': str, 'market_slug': str, ...}, ...]
+        price_change_notifications: [{'order_hash': str, 'order_api_id': str, 'market_slug': str, ...}, ...]
     """
-    orders_to_cancel = []
+    orders_to_cancel = []  # Список order_api_id для отмены
     orders_to_place = []
     price_change_notifications = []  # Список уведомлений о смещении цены
     
-    # Получаем данные пользователя
-    user = await get_user(telegram_id)
-    if not user:
-        logger.warning(f"Пользователь {telegram_id} не найден в БД")
-        return orders_to_cancel, orders_to_place, price_change_notifications
-    
-    # Создаем клиент
-    try:
-        client = create_client(user)
-    except Exception as e:
-        logger.error(f"Ошибка создания клиента для пользователя {telegram_id}: {e}")
-        return orders_to_cancel, orders_to_place, price_change_notifications
-    
-    # Получаем активные ордера из БД
-    db_orders = await get_user_orders(telegram_id, status="pending")
+    # Получаем активные ордера из БД (статус OPEN соответствует активным ордерам)
+    db_orders = await get_user_orders(telegram_id, status=ORDER_STATUS_OPEN)
     
     if not db_orders:
         logger.info(f"У пользователя {telegram_id} нет активных ордеров")
@@ -279,8 +243,10 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
     # Обрабатываем каждый ордер
     for db_order in db_orders:
         try:
-            order_id = db_order.get("order_id")
+            order_hash = db_order.get("order_hash")
             market_id = db_order.get("market_id")
+            market_title = db_order.get("market_title")
+            market_slug = db_order.get("market_slug")
             token_id = db_order.get("token_id")  # Используем token_id из БД
             token_name = db_order.get("token_name")  # YES или NO
             side = db_order.get("side")  # BUY или SELL
@@ -290,62 +256,90 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
             amount = db_order.get("amount", 0.0)
             reposition_threshold_cents = float(db_order.get("reposition_threshold_cents"))
             db_status = db_order.get('status')
+            order_api_id = db_order.get('order_api_id')
             
-            if not order_id or not market_id or not side or not token_id:
-                logger.warning(f"Пропуск ордера с неполными данными: {order_id}")
+            if not order_hash or not market_id or not side or not token_id:
+                logger.warning(f"Пропуск ордера с неполными данными: {order_hash}")
                 continue
 
-            logger.info(f"--- Обрабатываем ордер {order_id} со статусом {db_status}")
+            logger.info(f"--- Обрабатываем ордер {order_hash} со статусом {db_status}")
             
             # Проверяем статус ордера через API
-            # Если ордер был активным, а стал заполненным, обновляем БД и отправляем уведомление
+            # Если ордер был активным, а стал заполненным/отмененным/истекшим/инвалидированным, обновляем БД
+            # В новом API order_hash в БД - это hash ордера
             try:
-                api_order = await get_order_by_id(client, order_id)
+                api_order = await api_client.get_order_by_id(order_hash=order_hash)
                 if api_order:
-                    # Получаем числовой статус из API и приводим к строке
-                    api_status = str(getattr(api_order, 'status', None))
+                    # Получаем статус из API (новый API возвращает строки: 'OPEN', 'FILLED', 'CANCELLED', 'EXPIRED', 'INVALIDATED')
+                    api_status = api_order.get('status', '').upper()
 
-                    logger.info(f"Ордер {order_id} статус в API: {api_status} статус в БД: {db_status}")
+                    logger.info(f"Ордер {order_hash} статус в API: {api_status} статус в БД: {db_status}")
 
-                    # Если статус в БД был 'pending', а в API стал 'Finished' (finished)
-                    if db_status == 'pending' and api_status == ORDER_STATUS_FINISHED:
-                        logger.info(f"Ордер {order_id} был pending, теперь finished. Обновляем БД и отправляем уведомление.")
+                    # Если статус в БД был 'OPEN', а в API стал 'FILLED'
+                    if db_status == ORDER_STATUS_OPEN and api_status == ORDER_STATUS_FILLED:
+                        logger.info(f"Ордер {order_hash} был OPEN, теперь FILLED. Обновляем БД и отправляем уведомление.")
                         
-                        # Обновляем статус в БД
-                        await update_order_status(order_id, 'finished')
+                        # Обновляем статус в БД (используем статус из API напрямую)
+                        await update_order_status(order_hash, ORDER_STATUS_FILLED)
                         
                         # Отправляем уведомление пользователю
+                        # Используем db_order для базовых данных и api_order для amountFilled (точное значение исполненной суммы)
                         if bot:
-                            await send_order_filled_notification(bot, telegram_id, api_order)
+                            await send_order_filled_notification(bot, telegram_id, db_order, api_order)
                         
                         # Пропускаем дальнейшую обработку этого ордера
                         continue
                     
-                    # Если статус в БД был 'pending', а в API стал 'Canceled' (canceled)
-                    elif db_status == 'pending' and api_status == ORDER_STATUS_CANCELED:
-                        logger.info(f"Ордер {order_id} был pending, теперь canceled. Обновляем БД.")
+                    # Если статус в БД был 'OPEN', а в API стал 'CANCELLED', 'EXPIRED' или 'INVALIDATED'
+                    elif db_status == ORDER_STATUS_OPEN and api_status in (ORDER_STATUS_CANCELLED, ORDER_STATUS_EXPIRED, ORDER_STATUS_INVALIDATED):
+                        logger.info(f"Ордер {order_hash} был OPEN, теперь {api_status}. Обновляем БД.")
                         
-                        # Обновляем статус в БД
-                        await update_order_status(order_id, 'canceled')
+                        # Обновляем статус в БД (используем статус из API напрямую)
+                        await update_order_status(order_hash, api_status)
+                        
+                        # Пропускаем дальнейшую обработку этого ордера
+                        continue
+                    
+                    # Если статус изменился, но не попал в известные случаи (неизвестный статус или неожиданное изменение)
+                    elif db_status != api_status:
+                        # Проверяем, является ли статус известным
+                        known_statuses = (ORDER_STATUS_OPEN, ORDER_STATUS_FILLED, ORDER_STATUS_CANCELLED, 
+                                         ORDER_STATUS_EXPIRED, ORDER_STATUS_INVALIDATED)
+                        
+                        if api_status not in known_statuses:
+                            # Неизвестный статус из API
+                            logger.warning(
+                                f"⚠️ Неизвестный статус ордера {order_hash} из API: '{api_status}' "
+                                f"(был в БД: '{db_status}'). Сохраняем статус в БД как есть."
+                            )
+                        else:
+                            # Известный статус, но неожиданное изменение (например, FILLED -> CANCELLED)
+                            logger.warning(
+                                f"⚠️ Неожиданное изменение статуса ордера {order_hash}: "
+                                f"'{db_status}' -> '{api_status}'. Обновляем БД."
+                            )
+                        
+                        # Обновляем статус в БД (сохраняем статус из API, даже если он неизвестный)
+                        await update_order_status(order_hash, api_status)
                         
                         # Пропускаем дальнейшую обработку этого ордера
                         continue
             except Exception as e:
-                # Логируем только краткое сообщение, детали уже залогированы в opinion_api_wrapper
+                # Логируем ошибку
                 error_str = str(e)
                 is_timeout = "504" in error_str or "Gateway Time-out" in error_str or "timeout" in error_str.lower()
                 
                 if is_timeout:
-                    logger.info(f"⏱️ Таймаут API при проверке статуса ордера {order_id}, продолжаем обработку без проверки статуса")
+                    logger.info(f"⏱️ Таймаут API при проверке статуса ордера {order_hash}, продолжаем обработку без проверки статуса")
                 else:
-                    logger.warning(f"Ошибка при проверке статуса ордера {order_id} через API: {e}")
+                    logger.warning(f"Ошибка при проверке статуса ордера {order_hash} через API: {e}")
                 
                 # Продолжаем обработку, если не удалось проверить статус (graceful degradation)
             
             # Получаем текущую цену рынка
-            new_current_price = get_current_market_price(client, token_id, side)
+            new_current_price = await get_current_market_price(api_client, market_id, side, token_name)
             if not new_current_price:
-                logger.warning(f"Не удалось получить текущую цену для ордера {order_id}")
+                logger.warning(f"Не удалось получить текущую цену для ордера {order_hash}")
                 continue
             
             # Вычисляем новую целевую цену с использованием сохраненного offset_ticks
@@ -368,12 +362,14 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
             expected_old_target_price = calculate_new_target_price(
                 current_price_at_creation,
                 side,
-                offset_ticks
+                offset_ticks,
+                TICK_SIZE
             )
             
-            logger.info(f"Цена изменилась для ордера {order_id}:")
+            logger.info(f"Цена изменилась для ордера {order_hash}:")
             logger.info(f"  👤 User ID: {telegram_id}")
             logger.info(f"  📊 Market ID: {market_id}")
+            logger.info(f"  📊 Market Slug: {market_slug}")
             logger.info(f"  🪙 Token: {token_name} {side}")
             logger.info(f"  Старая текущая цена: {current_price_at_creation}")
             logger.info(f"  Новая текущая цена: {new_current_price}")
@@ -392,32 +388,37 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
             # 2. Списки всегда одинаковой длины (проверяется позже для безопасности)
             # 3. Невозможно отменить ордер без размещения нового (и наоборот)
             if will_reposition:
-                # Добавляем ордер в список для отмены
-                orders_to_cancel.append(order_id)
-                logger.info(f"✅ Ордер {order_id} (User: {telegram_id}, Market: {market_id}) добавлен в список для отмены")
+                  
+                orders_to_cancel.append(order_api_id)
+                logger.info(f"✅ Ордер {order_hash} (API ID: {order_api_id}, User: {telegram_id}, Market: {market_id}) добавлен в список для отмены")
                 
                 # Подготавливаем параметры нового ордера
-                order_side = OrderSide.BUY if side == "BUY" else OrderSide.SELL
+                order_side = Side.BUY if side == "BUY" else Side.SELL
                 
                 new_order_params = {
-                    "old_order_id": order_id,  # Старый order_id для обновления БД
+                    "old_order_hash": order_hash,  # Старый order_hash для обновления БД
+                    "old_order_api_id": order_api_id,  # Старый order_api_id для отмены
                     "market_id": market_id,
+                    "market_title": market_title,  # Добавляем title для уведомлений
+                    "market_slug": market_slug,  # Добавляем slug для уведомлений
                     "token_id": token_id,
-                    "token_name": token_name,  # Добавляем для уведомлений
-                    "side": order_side,
-                    "price": new_target_price,
+                    "token_name": token_name,  # Добавляем для уведомлений и пересчета цены
+                    "side": order_side,  # Side.BUY или Side.SELL из predict_sdk
+                    "side_str": side,  # "BUY" или "SELL" (строка) для пересчета цены
+                    "offset_ticks": offset_ticks,  # Для пересчета цены перед размещением
+                    "price": new_target_price,  # Цена будет пересчитана перед размещением
                     "amount": amount,
                     "current_price_at_creation": new_current_price,  # Сохраняем для обновления БД
-                    "target_price": new_target_price,  # Сохраняем для обновления БД
+                    "target_price": new_target_price,  # Сохраняем для обновления БД (будет пересчитана)
                     "telegram_id": telegram_id,  # Добавляем для логирования
                 }
                 
                 # Добавляем в список для размещения (всегда в паре с отменой)
                 orders_to_place.append(new_order_params)
-                logger.info(f"✅ Ордер {order_id} (User: {telegram_id}, Market: {market_id}) добавлен в список для размещения")
+                logger.info(f"✅ Ордер {order_hash} (User: {telegram_id}, Market: {market_slug}) добавлен в список для размещения")
             else:
                 logger.info(
-                    f"⏭️ Ордер {order_id} (User: {telegram_id}, Market: {market_id}) не будет переставлен: "
+                    f"⏭️ Ордер {order_hash} (User: {telegram_id}, Market: {market_slug}) не будет переставлен: "
                     f"изменение целевой цены недостаточно ({target_price_change_cents:.2f}¢ < {reposition_threshold_cents:.2f}¢)"
                 )
             
@@ -426,8 +427,11 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
             if will_reposition:
                 # Добавляем уведомление о смещении цены только для ордеров, которые будут переставлены
                 price_change_notifications.append({
-                    "order_id": order_id,
+                    "order_hash": order_hash,
+                    "order_api_id": order_api_id,
                     "market_id": market_id,
+                    "market_title": market_title,  # Добавляем title для уведомлений
+                    "market_slug": market_slug,
                     "token_name": token_name,
                     "side": side,
                     "old_current_price": current_price_at_creation,
@@ -442,142 +446,192 @@ async def process_user_orders(telegram_id: int, bot=None) -> Tuple[List[str], Li
                     "will_reposition": will_reposition,
                 })
             else:
-                logger.info(f"⏭️ Ордер {order_id} не будет переставлен, уведомление не отправляется")
+                logger.info(f"⏭️ Ордер {order_hash} не будет переставлен, уведомление не отправляется")
             
         except Exception as e:
-            logger.error(f"Ошибка при обработке ордера {db_order.get('order_id', 'unknown')}: {e}")
+            logger.error(f"Ошибка при обработке ордера {db_order.get('order_hash', 'unknown')}: {e}")
             # При ошибке не добавляем уведомление, чтобы не вводить пользователя в заблуждение
             continue
     
     return orders_to_cancel, orders_to_place, price_change_notifications
 
 
-def cancel_orders_batch(client, order_ids: List[str]) -> List[Dict]:
+async def cancel_orders_batch(api_client: PredictAPIClient, orders_to_cancel: List[str]) -> Dict:
     """
-    Отменяет ордера батчем.
+    Отменяет ордера через API (off-chain, удаление из orderbook).
     
     Args:
-        client: Клиент PredictDotFun SDK
-        order_ids: Список ID ордеров для отмены
+        api_client: Клиент Predict.fun API
+        orders_to_cancel: Список order_api_id для отмены [order_api_id: str, ...]
     
     Returns:
-        Список результатов отмены
+        Словарь с результатом: {
+            'success': bool,
+            'removed': List[str],  # ID ордеров, которые были успешно удалены
+            'noop': List[str],     # ID ордеров, которые уже были удалены/исполнены/отменены
+            'cause': Optional[str] # Причина ошибки, если success=False
+        }
     """
     try:
-        results = client.cancel_orders_batch(order_ids)
+        if not orders_to_cancel:
+            logger.warning("Нет ордеров для отмены (не удалось получить ID)")
+            return {'success': False, 'removed': [], 'noop': [], 'cause': 'No orders to cancel'}
         
-        success_count = 0
-        failed_count = 0
+        # Отменяем ордера через API (off-chain)
+        result = await api_client.cancel_orders(order_ids=orders_to_cancel)
         
-        for i, result in enumerate(results):
-            if result.get('success', False):
-                success_count += 1
-                # Проверяем, есть ли дополнительная информация в результате
-                result_data = result.get('result')
-                if result_data:
-                    if hasattr(result_data, 'errno'):
-                        if result_data.errno == 0:
-                            logger.info(f"Отменен ордер: {order_ids[i]}")
-                        else:
-                            logger.error(f"Ошибка при отмене ордера {order_ids[i]}: errno={result_data.errno}, errmsg={getattr(result_data, 'errmsg', 'N/A')}")
-                            failed_count += 1
-                            success_count -= 1
-                    else:
-                        logger.info(f"Отменен ордер: {order_ids[i]}")
-                else:
-                    logger.info(f"Отменен ордер: {order_ids[i]}")
-            else:
-                failed_count += 1
-                error = result.get('error', 'Unknown error')
-                logger.error(f"Не удалось отменить ордер {order_ids[i]}: {error}")
+        if result.get('success', False):
+            removed_count = len(result.get('removed', []))
+            noop_count = len(result.get('noop', []))
+            logger.info(f"Успешно отменено {removed_count} ордеров через API (noop: {noop_count})")
+        else:
+            logger.error(f"Ошибка при отмене ордеров через API")
         
-        logger.info(f"Отменено ордеров: {success_count}, ошибок: {failed_count}")
-        return results
+        return result
         
     except Exception as e:
         logger.error(f"Ошибка при batch отмене ордеров: {e}")
-        return []
+        return {'success': False, 'removed': [], 'noop': [], 'cause': str(e)}
 
 
-def place_orders_batch(client, orders_params: List[Dict]) -> List:
+async def place_orders_batch(api_client: PredictAPIClient, orders_params: List[Dict]) -> List[Dict]:
     """
-    Размещает ордера батчем.
+    Размещает ордера через новый API (SDK + REST API).
+    
+    В новом API нет батч размещения, поэтому размещаем ордера последовательно.
     
     Args:
-        client: Клиент PredictDotFun SDK
-        orders_params: Список параметров ордеров
+        api_client: Клиент Predict.fun API
+        orders_params: Список параметров ордеров (должен содержать order_builder, api_client, market_id, token_id, side, price, amount)
     
     Returns:
-        Список результатов размещения
+        Список результатов размещения. Каждый результат имеет структуру:
+        {
+            'success': bool,
+            'order_hash': Optional[str],  # Hash ордера (используется как order_id в БД)
+            'order_id': Optional[str],    # ID ордера из API (bigint string)
+            'error': Optional[str]
+        }
     """
-    try:
-        client.enable_trading()
-        
-        # Преобразуем параметры в PlaceOrderDataInput
-        orders = []
-        for params in orders_params:
-            price_rounded = round(float(params["price"]), 3)
+    results = []
+    
+    for i, params in enumerate(orders_params):
+        try:
+            order_builder = params.get('order_builder')
+            if not order_builder:
+                logger.error(f"Отсутствует order_builder в параметрах ордера {i}")
+                results.append({
+                    'success': False,
+                    'order_hash': None,
+                    'order_api_id': None,
+                    'error': 'Missing order_builder'
+                })
+                continue
             
-            # makerAmountInQuoteToken может быть int или float, не обязательно str
-            amount_value = params["amount"]
-            if isinstance(amount_value, str):
-                amount_value = float(amount_value)
+            # Получаем параметры для размещения
+            market_id = params.get('market_id')
+            token_id = params.get('token_id')
+            side = params.get("side")  # Side.BUY или Side.SELL
+            price = float(params["price"])
+            amount = float(params["amount"])
             
-            order_input = PlaceOrderDataInput(
-                marketId=params["market_id"],
-                tokenId=params["token_id"],
-                side=params["side"],
-                orderType=LIMIT_ORDER,
-                price=str(price_rounded),
-                makerAmountInQuoteToken=amount_value  # int или float, не str
-            )
-            orders.append(order_input)
-        
-        # Размещаем ордера батчем
-        results = client.place_orders_batch(orders, check_approval=False)
-        
-        success_count = 0
-        failed_count = 0
-        
-        for i, result in enumerate(results):
-            # Согласно документации: place_orders_batch возвращает List[Any],
-            # где каждый элемент имеет структуру: {'success': bool, 'result': API response, 'error': Any}
-            # API response содержит: errno (0 = success), errmsg, result (с данными ордера)
-            if result.get('success', False):
-                # result['result'] - это API response объект с полями errno, errmsg, result
-                # result['result'].result - содержит данные ордера (order_data с order_id)
-                order_id = 'unknown'
+            # Проверяем тип side
+            if not isinstance(side, Side):
+                logger.error(f"Неверный тип side для ордера {i}: {type(side)}")
+                results.append({
+                    'success': False,
+                    'order_hash': None,
+                    'order_api_id': None,
+                    'error': 'Invalid side type'
+                })
+                continue
+            
+            # Пересчитываем цену перед размещением (цена могла измениться пока мы отменяли старые ордера)
+            token_name = params.get('token_name')
+            side_str = params.get('side_str')  # "BUY" или "SELL" (строка)
+            offset_ticks = params.get('offset_ticks')
+            
+            final_price = price
+            current_price_for_db = None
+            
+            if token_name and side_str and offset_ticks is not None:
+                # Получаем актуальную текущую цену рынка
+                current_price = await get_current_market_price(api_client, market_id, side_str, token_name)
+                if current_price:
+                    # Пересчитываем целевую цену с актуальной текущей ценой
+                    recalculated_price = calculate_new_target_price(
+                        current_price,
+                        side_str,
+                        offset_ticks,
+                        TICK_SIZE
+                    )
+                    logger.info(
+                        f"Пересчитана цена перед размещением ордера {i}: "
+                        f"старая цена={price}, новая цена={recalculated_price}, "
+                        f"текущая цена рынка={current_price}"
+                    )
+                    final_price = recalculated_price
+                    current_price_for_db = current_price
+                else:
+                    # Если не удалось получить текущую цену, используем цену из params
+                    logger.warning(f"Не удалось получить текущую цену для пересчета, используем цену из params")
+            
+            # Получаем данные рынка (если нужно)
+            market = None
+            if market_id:
                 try:
-                    result_data = result.get('result')
-                    # Согласно документации, API response всегда имеет errno
-                    # Проверяем errno == 0 для правильного подсчета успешных размещений
-                    if result_data and result_data.errno == 0:
-                        order_id = result_data.result.order_data.order_id
-                        logger.info(f"Размещен ордер: {order_id}")
-                        success_count += 1
-                    else:
-                        # Если errno != 0, это ошибка, даже если success=True
-                        errno = result_data.errno if result_data else 'N/A'
-                        errmsg = result_data.errmsg if result_data else 'No result_data'
-                        logger.warning(f"Ошибка размещения ордера {i}: errno={errno}, errmsg={errmsg}")
-                        failed_count += 1
-                except (AttributeError, TypeError) as e:
-                    logger.error(f"Не удалось извлечь order_id из результата {i}: {e}")
-                    failed_count += 1
+                    market = await api_client.get_market(market_id=market_id)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить данные рынка {market_id}: {e}")
+            
+            # Используем общий метод размещения ордера
+            success, order_hash, order_api_id, error_msg = await place_single_order(
+                api_client=api_client,
+                order_builder=order_builder,
+                token_id=token_id,
+                side=side,
+                price=final_price,  # Используем пересчитанную цену
+                amount=amount,
+                market=market,
+                market_id=market_id
+            )
+            
+            if success:
+                logger.info(f"Размещен ордер: hash={order_hash}, api_id={order_api_id}")
+                # Обновляем цены в params для использования при обновлении БД
+                if current_price_for_db is not None:
+                    params["current_price_at_creation"] = current_price_for_db
+                    params["target_price"] = final_price
+                results.append({
+                    'success': True,
+                    'order_hash': order_hash,
+                    'order_api_id': order_api_id,
+                    'error': None
+                })
             else:
-                failed_count += 1
-                error = result.get('error', 'Unknown error')
-                logger.error(f"Не удалось разместить ордер {i}: {error}")
+                logger.error(f"Ошибка размещения ордера {i}: {error_msg}")
+                results.append({
+                    'success': False,
+                    'order_hash': None,
+                    'order_api_id': None,
+                    'error': error_msg
+                })
         
-        logger.info(f"Размещено ордеров: {success_count}, ошибок: {failed_count}")
-        return results
-        
-    except Exception as e:
-        logger.error(f"Ошибка при batch размещении ордеров: {e}")
-        traceback.print_exc()
-        return []
-
-
+        except Exception as e:
+            logger.error(f"Ошибка при размещении ордера {i}: {e}")
+            traceback.print_exc()
+            results.append({
+                'success': False,
+                'order_hash': None,
+                'order_api_id': None,
+                'error': str(e)
+            })
+    
+    success_count = sum(1 for r in results if r.get('success', False))
+    failed_count = len(results) - success_count
+    logger.info(f"Размещено ордеров: {success_count}, ошибок: {failed_count}")
+    
+    return results
 
 
 async def send_price_change_notification(bot, telegram_id: int, notification: Dict):
@@ -608,7 +662,7 @@ async def send_price_change_notification(bot, telegram_id: int, notification: Di
         message = f"""🔔 <b>Price Change Detected</b>
 
 {side_emoji} <b>{notification['token_name']} {notification['side']}</b>
-📊 Market ID: {notification['market_id']}
+📊 Market title: {notification.get('market_title', 'N/A')}
 
 💰 <b>Current Price:</b>
    Old: {old_price_cents:.2f} cents
@@ -627,27 +681,27 @@ async def send_price_change_notification(bot, telegram_id: int, notification: Di
 {status_emoji} <b>Status:</b> {status_text}"""
         
         await bot.send_message(chat_id=telegram_id, text=message)
-        logger.info(f"Sent price change notification to user {telegram_id} for order {notification['order_id']}")
+        logger.info(f"Sent price change notification to user {telegram_id} for order {notification.get('order_hash', 'unknown')}")
     except Exception as e:
         logger.error(f"Failed to send price change notification to user {telegram_id}: {e}")
 
 
-async def send_order_updated_notification(bot, telegram_id: int, order_params: Dict, new_order_id: str):
+async def send_order_updated_notification(bot, telegram_id: int, order_params: Dict, new_order_hash: str):
     """Отправляет уведомление пользователю об успешном обновлении ордера в БД."""
     try:
         current_price_cents = order_params["current_price_at_creation"] * 100
         target_price_cents = order_params["target_price"] * 100
         
-        side_emoji = "📈" if order_params.get("side") == OrderSide.BUY else "📉"
-        side_text = "BUY" if order_params.get("side") == OrderSide.BUY else "SELL"
+        side_emoji = "📈" if order_params.get("side") == Side.BUY else "📉"
+        side_text = "BUY" if order_params.get("side") == Side.BUY else "SELL"
         
         message = f"""✅ <b>Order Updated Successfully</b>
 
 {side_emoji} <b>{order_params.get('token_name', 'N/A')} {side_text}</b>
-📊 Market ID: {order_params['market_id']}
+📊 Market title: {order_params.get('market_title', 'N/A')}
 
-🆔 <b>New Order ID:</b>
-<code>{new_order_id}</code>
+🆔 <b>New Order Hash:</b>
+<code>{new_order_hash}</code>
 
 💰 <b>Current Price:</b> {current_price_cents:.2f} cents
 🎯 <b>Target Price:</b> {target_price_cents:.2f} cents
@@ -656,12 +710,12 @@ async def send_order_updated_notification(bot, telegram_id: int, order_params: D
 Order has been successfully moved to maintain the offset."""
         
         await bot.send_message(chat_id=telegram_id, text=message)
-        logger.info(f"Sent order updated notification to user {telegram_id} for order {new_order_id}")
+        logger.info(f"Sent order updated notification to user {telegram_id} for order {new_order_hash}")
     except Exception as e:
         logger.error(f"Failed to send order updated notification to user {telegram_id}: {e}")
 
 
-async def send_order_placement_error_notification(bot, telegram_id: int, order_params: Dict, old_order_id: str, errno: int, errmsg: str):
+async def send_order_placement_error_notification(bot, telegram_id: int, order_params: Dict, old_order_hash: str, errno: int, errmsg: str):
     """Отправляет уведомление пользователю об ошибке размещения ордера."""
     try:
         # Используем .get() для всех полей с значениями по умолчанию
@@ -670,8 +724,8 @@ async def send_order_placement_error_notification(bot, telegram_id: int, order_p
         current_price_cents = current_price * 100
         target_price_cents = target_price * 100
         
-        side_emoji = "📈" if order_params.get("side") == OrderSide.BUY else "📉"
-        side_text = "BUY" if order_params.get("side") == OrderSide.BUY else "SELL"
+        side_emoji = "📈" if order_params.get("side") == Side.BUY else "📉"
+        side_text = "BUY" if order_params.get("side") == Side.BUY else "SELL"
         
         # Формируем сообщение об ошибке с информацией из API
         error_type = f"Error {errno}"
@@ -680,10 +734,10 @@ async def send_order_placement_error_notification(bot, telegram_id: int, order_p
         message = f"""❌ <b>Order Repositioning Failed</b>
 
 {side_emoji} <b>{order_params.get('token_name', 'N/A')} {side_text}</b>
-📊 Market ID: {order_params.get('market_id', 'N/A')}
+📊 Market title: {order_params.get('market_title', 'N/A')}
 
-🆔 <b>Cancelled Order ID:</b>
-<code>{old_order_id}</code>
+🆔 <b>Cancelled Order Hash:</b>
+<code>{old_order_hash}</code>
 
 💰 <b>Target Price:</b> {target_price_cents:.2f} cents
 💵 <b>Amount:</b> {order_params.get('amount', 'N/A')} USDT
@@ -694,80 +748,59 @@ async def send_order_placement_error_notification(bot, telegram_id: int, order_p
 <b>⚠️ IMPORTANT:</b> Your old order has been cancelled. Please check your balance and place a new order manually if needed."""
         
         await bot.send_message(chat_id=telegram_id, text=message)
-        logger.info(f"Sent order placement error notification to user {telegram_id} for order {old_order_id}")
+        logger.info(f"Sent order placement error notification to user {telegram_id} for order {old_order_hash}")
     except Exception as e:
         logger.error(f"Failed to send order placement error notification to user {telegram_id}: {e}")
 
 
-async def send_order_filled_notification(bot, telegram_id: int, api_order):
+async def send_order_filled_notification(bot, telegram_id: int, db_order: Dict, api_order: Optional[Dict]):
     """
-    Отправляет предупреждающее уведомление пользователю об исполнении ордера.
+    Отправляет уведомление пользователю об исполнении ордера.
     
     Args:
         bot: Экземпляр aiogram Bot
         telegram_id: ID пользователя в Telegram
-        api_order: Объект ордера из API (с полями order_id, market_id, market_title, 
-                  root_market_id, root_market_title, price, side_enum, outcome, 
-                  order_amount, filled_amount, и другие)
+        db_order: Словарь с данными ордера из БД
+        api_order: Словарь с данными ордера из API (опционально, для получения точного amountFilled)
     """
     try:
-        # Извлекаем данные из объекта ордера API
-        order_id = getattr(api_order, 'order_id', 'N/A')
-        market_id = getattr(api_order, 'market_id', 'N/A')
-        market_title = getattr(api_order, 'market_title', 'N/A')
-        root_market_id = getattr(api_order, 'root_market_id', None)
-        root_market_title = getattr(api_order, 'root_market_title', 'N/A')
-        side_enum = getattr(api_order, 'side_enum', 'N/A')
-        outcome = getattr(api_order, 'outcome', 'N/A')
+        # Извлекаем данные из БД
+        order_hash = db_order.get('order_hash')
+        market_title = db_order.get('market_title')
+        market_slug = db_order.get('market_slug')
+        side = db_order.get('side')  # BUY или SELL
         
-        # Цена исполнения - используем price из ордера (цена по которой был размещен ордер)
-        # Если есть информация о сделках, можно использовать цену из trades
-        price_str = getattr(api_order, 'price', '0')
+        # Определяем side и emoji
+        side_enum = side.upper()  # BUY или SELL
+        side_emoji = "📈" if side_enum == "BUY" else "📉"
+        
+        amount_filled = api_order.get('amountFilled')
+        
+        # Форматируем amount
         try:
-            price_float = float(price_str)
-            price_cents = price_float * 100
-            price_display = f"{price_cents:.2f}".rstrip('0').rstrip('.')
+            amount_float = float(amount_filled)
+            amount_display = f"{amount_float:.6f}".rstrip('0').rstrip('.')
         except (ValueError, TypeError):
-            price_display = str(price_str)
+            amount_display = str(amount_filled)
         
-        # Количество
-        filled_amount = getattr(api_order, 'filled_amount', '0')
-        order_amount = getattr(api_order, 'order_amount', '0')
-        try:
-            filled_amount_float = float(filled_amount)
-            order_amount_float = float(order_amount)
-            amount_display = f"{filled_amount_float:.6f}".rstrip('0').rstrip('.')
-        except (ValueError, TypeError):
-            amount_display = str(filled_amount)
-        
-        # Эмодзи для направления
-        side_emoji = "📈" if side_enum == "Buy" else "📉"
-        
-        # Формируем ссылку на корневой маркет
-        if root_market_id:
-            market_url = f"https://app.opinion.trade/detail?topicId={root_market_id}"
-            market_link_text = root_market_title[:50] if root_market_title else f'Market {root_market_id}'
-        else:
-            # Если нет root_market_id, используем обычный market_id
-            market_url = f"https://app.opinion.trade/detail?topicId={market_id}"
-            market_link_text = market_title[:50] if market_title else f'Market {market_id}'
+       
+        market_url = f"https://predict.fun/market/{market_slug}"
         
         message = f"""🚨 <b>Order Filled - Action Required</b>
 
-{side_emoji} <b>{outcome} {side_enum}</b>
-📊 Market ID: {market_id}
-📋 Root Market: <a href="{market_url}">{market_link_text}</a>
+{side_emoji} <b>{side_enum}</b>
+📊 Market title: {market_title}
+📋 Market: <a href="{market_url}">View Market</a>
 
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
+🆔 <b>Order Hash:</b>
+<code>{order_hash}</code>
 
-💰 <b>Filled Price:</b> {price_display}¢
 💵 <b>Filled Amount:</b> {amount_display} USDT
 
 Your order has been successfully filled! Please check the market and consider placing new orders. 🎉"""
         
         await bot.send_message(chat_id=telegram_id, text=message, parse_mode="HTML")
-        logger.info(f"Отправлено уведомление об исполнении ордера {order_id} пользователю {telegram_id}")
+        logger.info(f"Отправлено уведомление об исполнении ордера {order_hash} пользователю {telegram_id}")
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления пользователю {telegram_id}: {e}")
         logger.error(traceback.format_exc())
@@ -781,7 +814,7 @@ async def send_cancellation_error_notification(bot, telegram_id: int, failed_ord
         bot: Экземпляр aiogram Bot
         telegram_id: ID пользователя в Telegram
         failed_orders: Список словарей с информацией о неудачных отменах:
-            [{"order_id": str, "market_id": int, "token_name": str, "side": str, "errno": int, "errmsg": str}, ...]
+            [{"order_hash": str, "market_id": int, "token_name": str, "side": str, "errno": int, "errmsg": str}, ...]
     """
     try:
         if not failed_orders:
@@ -790,16 +823,16 @@ async def send_cancellation_error_notification(bot, telegram_id: int, failed_ord
         # Формируем список неудачных ордеров
         orders_list = []
         for order_info in failed_orders:
-            order_id = order_info.get("order_id", "Unknown")
-            market_id = order_info.get("market_id", "N/A")
+            order_hash = order_info.get("order_hash", "Unknown")
+            market_title = order_info.get("market_title", "N/A")
             token_name = order_info.get("token_name", "N/A")
             side = order_info.get("side", "N/A")
             errno = order_info.get("errno", "N/A")
             errmsg = order_info.get("errmsg", "Unknown error")
             
             orders_list.append(
-                f"• Order <code>{order_id}</code>\n"
-                f"  Market: {market_id}, Token: {token_name} {side}\n"
+                f"• Order <code>{order_hash}</code>\n"
+                f"  Market title: {market_title}, Token: {token_name} {side}\n"
                 f"  Error: {errno} - {errmsg}"
             )
         
@@ -847,6 +880,8 @@ async def async_sync_all_orders(bot):
     
     # Общая статистика
     total_cancelled = 0
+    total_noop = 0  # Ордера, которые уже были удалены/исполнены/отменены ранее
+    total_processed = 0  # Все обработанные ордера (удаленные + noop)
     total_placed = 0
     total_errors = 0
     
@@ -862,16 +897,45 @@ async def async_sync_all_orders(bot):
         logger.info(f"{'='*80}")
         
         try:
-            # Получаем списки ордеров для отмены и размещения, а также уведомления
-            orders_to_cancel, orders_to_place, price_change_notifications = await process_user_orders(telegram_id, bot)
+            # Получаем данные пользователя и создаем клиент один раз
+            user = await get_user(telegram_id)
+            if not user:
+                logger.warning(f"Пользователь {telegram_id} не найден в БД")
+                continue
             
-            # Отправляем уведомления о смещении цены (независимо от успешности отмены/создания)
-            for notification in price_change_notifications:
-                await send_price_change_notification(bot, telegram_id, notification)
+            # Создаем API клиент и OrderBuilder один раз для пользователя
+            try:
+                api_client = PredictAPIClient(
+                    api_key=user['api_key'],
+                    wallet_address=user['wallet_address'],
+                    private_key=user['private_key']
+                )
+                
+                # Создаем OrderBuilder для SDK операций
+                chain_id = get_chain_id()
+                order_builder = await asyncio.to_thread(
+                    OrderBuilder.make,
+                    chain_id,
+                    user['private_key'],
+                    OrderBuilderOptions(predict_account=user['wallet_address'])
+                )
+            except Exception as e:
+                logger.error(f"Ошибка создания клиента для пользователя {telegram_id}: {e}")
+                total_errors += 1
+                continue
+            
+            # Получаем списки ордеров для отмены и размещения, а также уведомления
+            orders_to_cancel, orders_to_place, price_change_notifications = await process_user_orders(
+                telegram_id, api_client, bot
+            )
             
             if not orders_to_cancel and not orders_to_place:
                 logger.info(f"Нет ордеров для перемещения у пользователя {telegram_id}")
                 continue
+
+            # Отправляем уведомления о смещении цены (независимо от успешности отмены/создания)
+            for notification in price_change_notifications:
+                await send_price_change_notification(bot, telegram_id, notification)
             
             logger.info(f"Ордеров для отмены: {len(orders_to_cancel)}")
             logger.info(f"Ордеров для размещения: {len(orders_to_place)}")
@@ -890,162 +954,138 @@ async def async_sync_all_orders(bot):
                 logger.info(f"Нет ордеров для перестановки у пользователя {telegram_id} (изменение недостаточно для всех ордеров)")
                 continue
             
-            # Получаем клиент для пользователя
-            user = await get_user(telegram_id)
-            # create_client остается синхронным, но это быстрая операция
-            client = create_client(user)
-            
             # Отменяем старые ордера
             cancelled_count = 0
+            total_processed = 0  # Инициализируем для использования после блока if
             if orders_to_cancel:
                 logger.info(f"🔄 Отмена ордеров для пользователя {telegram_id}...")
-                # Обертываем синхронный вызов в asyncio.to_thread, чтобы не блокировать event loop
-                cancel_results = await asyncio.to_thread(cancel_orders_batch, client, orders_to_cancel)
+                cancel_result = await cancel_orders_batch(api_client, orders_to_cancel)
                 
-                # Проверяем успешность отмены более тщательно
-                # Списки orders_to_cancel и orders_to_place всегда одинаковой длины (проверено выше),
-                # поэтому можем безопасно использовать индекс i для обоих списков
-                failed_cancellations = []  # Список неудачных отмен для уведомления
-                
-                for i, result in enumerate(cancel_results):
-                    order_id = orders_to_cancel[i]
-                    # Получаем market_id из соответствующего ордера в orders_to_place
-                    # Индекс i безопасен, так как списки одинаковой длины
-                    market_id_info = f" (User: {telegram_id}, Market: {orders_to_place[i].get('market_id', 'N/A')})"
-                    is_success = False
+                # Проверяем успешность отмены
+                # cancel_orders возвращает {'success': bool, 'removed': [...], 'noop': [...]}
+                if cancel_result.get('success', False):
+                    removed = cancel_result.get('removed', [])
+                    noop = cancel_result.get('noop', [])
+                    cancelled_count = len(removed)
+                    user_total_processed = len(removed) + len(noop)  # Все обработанные ордера для этого пользователя (удаленные + уже удаленные)
+                    logger.info(f"✅ Успешно отменено {cancelled_count} ордеров через API (noop: {len(noop)}, всего обработано: {user_total_processed})")
                     
-                    if result.get('success', False):
-                        # Дополнительная проверка через result_data.errno
-                        result_data = result.get('result')
-                        if result_data and hasattr(result_data, 'errno'):
-                            if result_data.errno == 0:
-                                is_success = True
-                                logger.info(f"✅ Отменен ордер: {order_id}{market_id_info}")
-                            else:
-                                # Собираем информацию об ошибке для уведомления
-                                errno = result_data.errno
-                                errmsg = getattr(result_data, 'errmsg', 'N/A')
-                                logger.error(f"❌ Ошибка при отмене ордера {order_id}{market_id_info}: errno={errno}, errmsg={errmsg}")
-                                
-                                # Сохраняем информацию о неудачной отмене
+                    # Если не все ордера были обработаны (ни в removed, ни в noop), это ошибка
+                    if user_total_processed == 0:
+                        logger.error(f"❌ Не удалось обработать ни одного ордера (ни удалить, ни найти в noop)")
+                        failed_cancellations = []
+                        for i, order_api_id in enumerate(orders_to_cancel):
                                 order_params = orders_to_place[i]
+                                order_hash = order_params.get('old_order_hash', 'Unknown')
                                 failed_cancellations.append({
-                                    "order_id": order_id,
+                                    "order_hash": order_hash,
                                     "market_id": order_params.get('market_id', 'N/A'),
+                                    "market_title": order_params.get('market_title', 'N/A'),
                                     "token_name": order_params.get('token_name', 'N/A'),
-                                    "side": "BUY" if order_params.get('side') == OrderSide.BUY else "SELL",
-                                    "errno": errno,
-                                    "errmsg": errmsg
-                                })
-                        else:
-                            # Если нет result_data, считаем успешным если success=True
-                            is_success = True
-                            logger.info(f"✅ Отменен ордер: {order_id}{market_id_info}")
-                    else:
-                        # Если success=False, собираем информацию об ошибке
-                        error = result.get('error', 'Unknown error')
-                        logger.error(f"❌ Не удалось отменить ордер {order_id}{market_id_info}: {error}")
-                        
-                        order_params = orders_to_place[i]
-                        failed_cancellations.append({
-                            "order_id": order_id,
-                            "market_id": order_params.get('market_id', 'N/A'),
-                            "token_name": order_params.get('token_name', 'N/A'),
-                            "side": "BUY" if order_params.get('side') == OrderSide.BUY else "SELL",
-                            "errno": "N/A",
-                            "errmsg": str(error)
-                        })
+                                "side": "BUY" if order_params.get('side') == Side.BUY else "SELL",
+                                "errno": "N/A",
+                                "errmsg": "Failed to cancel order"
+                            })
+                        await send_cancellation_error_notification(bot, telegram_id, failed_cancellations)
+                        continue
+                else:
+                    # Если отмена не удалась, собираем информацию об ошибке
+                    failed_cancellations = []
+                    cause = cancel_result.get('cause', 'Unknown error')
+                    logger.error(f"❌ Ошибка при отмене ордеров: {cause}")
                     
-                    if is_success:
-                        cancelled_count += 1
-                
-                total_cancelled += cancelled_count
-                
-                # Проверяем, что все ордера успешно отменены
-                if cancelled_count != len(orders_to_cancel):
-                    failed_count = len(orders_to_cancel) - cancelled_count
-                    logger.error(f"Не удалось отменить {failed_count} из {len(orders_to_cancel)} ордеров")
-                    logger.warning("Пропускаем размещение новых ордеров, так как не все старые были отменены")
+                    # Для каждого ордера создаем запись об ошибке
+                    for i, order_api_id in enumerate(orders_to_cancel):
+                        order_params = orders_to_place[i]
+                        order_hash = order_params.get('old_order_hash', 'Unknown')
+                        failed_cancellations.append({
+                            "order_hash": order_hash,
+                            "market_id": order_params.get('market_id', 'N/A'),
+                            "market_title": order_params.get('market_title', 'N/A'),
+                            "token_name": order_params.get('token_name', 'N/A'),
+                            "side": "BUY" if order_params.get('side') == Side.BUY else "SELL",
+                            "errno": "N/A",
+                            "errmsg": cause
+                        })
                     
                     # Отправляем уведомление пользователю об ошибке отмены
                     await send_cancellation_error_notification(bot, telegram_id, failed_cancellations)
                     continue
+                
+                # Обновляем общую статистику
+                total_cancelled += cancelled_count
+                total_noop += len(noop)
+                # Используем уже вычисленное значение user_total_processed для обновления глобальной статистики
+                total_processed += user_total_processed
+                
+                # Проверяем, что все ордера были обработаны (либо удалены, либо уже были удалены ранее)
+                # user_total_processed = removed + noop (все ордера, которые были обработаны для этого пользователя)
+                if user_total_processed < len(orders_to_cancel):
+                    failed_count = len(orders_to_cancel) - user_total_processed
+                    logger.warning(
+                        f"Не все ордера были обработаны: обработано {user_total_processed} из {len(orders_to_cancel)} "
+                        f"(удалено: {cancelled_count}, уже удалены: {len(noop)}, не обработано: {failed_count})"
+                    )
+                    # Не продолжаем размещение, так как не все ордера были обработаны
+                else:
+                    # Все ордера обработаны (удалены или уже были удалены ранее)
+                    logger.info(f"✅ Все ордера обработаны: удалено {cancelled_count}, уже удалены {len(noop)}")
             
-            # Размещаем новые ордера только если все старые успешно отменены
+            # Размещаем новые ордера только если все старые успешно обработаны
+            # (либо удалены через API, либо уже были удалены ранее и попали в noop)
             # БАТЧИ ФОРМИРУЮТСЯ ПО ПОЛЬЗОВАТЕЛЮ: каждый пользователь обрабатывается отдельно,
             # и для каждого пользователя создается свой батч ордеров (все ордера одного пользователя в одном батче)
-            if orders_to_place and cancelled_count == len(orders_to_cancel):
+            if orders_to_place and user_total_processed == len(orders_to_cancel):
                 logger.info(f"📝 Размещение ордеров для пользователя {telegram_id}...")
-                # Обертываем синхронный вызов в asyncio.to_thread, чтобы не блокировать event loop
-                place_results = await asyncio.to_thread(place_orders_batch, client, orders_to_place)
+                # Добавляем order_builder и api_client в параметры каждого ордера
+                for order_params in orders_to_place:
+                    order_params['order_builder'] = order_builder
+                    order_params['api_client'] = api_client
+                place_results = await place_orders_batch(api_client, orders_to_place)
+                
                 # Подсчитываем успешно размещенные ордера для общей статистики
-                # Согласно документации: result['success'] = True и result['result'].errno == 0 означает успех
-                # (детальное логирование уже происходит в place_orders_batch)
-                placed_count = sum(
-                    1 for r in place_results
-                    if isinstance(r, dict) and r.get('success', False) and r.get('result')
-                    and r.get('result').errno == 0
-                )
+                placed_count = sum(1 for r in place_results if r.get('success', False))
                 total_placed += placed_count
                 
                 # Обновляем цены в БД для успешно размещенных ордеров и отправляем уведомления
                 # Также обрабатываем ошибки размещения
                 # ВАЖНО: Уведомления об ошибках отправляются для КАЖДОГО ордера отдельно,
                 # если его размещение не удалось (не для всего батча целиком)
-                # Индекс i в place_results соответствует индексу i в orders_to_place (гарантировано API)
+                # Индекс i в place_results соответствует индексу i в orders_to_place (гарантировано)
                 for i, result in enumerate(place_results):
                     order_params = orders_to_place[i]  # Берем параметры ордера по индексу
-                    old_order_id = order_params.get("old_order_id")  # Это order_id старого ордера, который был отменен
+                    old_order_hash = order_params.get("old_order_hash")  # Это hash старого ордера, который был отменен
                     
-                    # Проверяем успешность размещения согласно документации
-                    # result['success'] = True и result['result'].errno == 0 означает успех
-                    result_data = result.get('result')
-                    is_success = (
-                        result.get('success', False) and
-                        result_data and
-                        result_data.errno == 0
-                    )
+                    is_success = result.get('success', False)
                     
                     if not is_success:
                         # Обрабатываем ошибку размещения для конкретного ордера
-                        # Мы знаем какой ордер не разместился: это orders_to_place[i] с old_order_id
-                        try:
-                            if result_data and result_data.errno != 0:
-                                errmsg = result_data.errmsg
-                                errno = result_data.errno
+                        error = result.get('error', 'Unknown error')
+                        errno = 0  # В новом API нет errno, используем 0
+                        errmsg = error
                                 
-                                # Отправляем уведомление пользователю об ошибке для ЭТОГО ордера
-                                # В уведомлении будет old_order_id (который был отменен) и информация о новом ордере
-                                await send_order_placement_error_notification(
-                                    bot, telegram_id, order_params, old_order_id, errno, errmsg
-                                )
-                                logger.warning(f"Ошибка размещения ордера {old_order_id} (индекс {i} в батче): errno={errno}, errmsg={errmsg}")
-                            else:
-                                # Если нет result_data или success=False
-                                error = result.get('error', 'Unknown error')
-                                logger.error(f"Не удалось разместить ордер {old_order_id} (индекс {i} в батче): {error}")
-                        except Exception as e:
-                            logger.error(f"Ошибка при обработке ошибки размещения ордера {old_order_id}: {e}")
+                        # Отправляем уведомление пользователю об ошибке для ЭТОГО ордера
+                        await send_order_placement_error_notification(
+                            bot, telegram_id, order_params, old_order_hash, errno, errmsg
+                        )
+                        logger.warning(f"Ошибка размещения ордера {old_order_hash} (индекс {i}): {errmsg}")
                         continue
                     
-                    # Структура из логов: result['result'].result.order_data.order_id
-                    try:
-                        result_data = result.get('result')
-                        if result_data and result_data.errno == 0:
-                            new_order_id = result_data.result.order_data.order_id
-                            
-                            if new_order_id and old_order_id:
-                                # Обновляем ордер в БД
-                                await update_order_in_db(
-                                    old_order_id,
-                                    new_order_id,
-                                    order_params["current_price_at_creation"],
-                                    order_params["target_price"]
-                                )
-                                # Отправляем уведомление об успешном обновлении
-                                await send_order_updated_notification(bot, telegram_id, order_params, new_order_id)
-                    except (AttributeError, TypeError) as e:
-                        logger.error(f"Не удалось извлечь order_id из результата размещения {i}: {e}")
+                    # Успешное размещение
+                    new_order_hash = result.get('order_hash')  # Hash нового ордера
+                    new_order_api_id = result.get('order_api_id')  # ID ордера из API для off-chain отмены
+                    
+                    if new_order_hash and old_order_hash:
+                        # Обновляем ордер в БД
+                        await update_order_in_db(
+                            old_order_hash,  # Старый hash
+                            new_order_hash,  # Новый hash
+                            order_params["current_price_at_creation"],
+                            order_params["target_price"],
+                            new_order_api_id  # Сохраняем order_api_id для будущих отмен
+                        )
+                        # Отправляем уведомление об успешном обновлении
+                        await send_order_updated_notification(bot, telegram_id, order_params, new_order_hash)
             
         except Exception as e:
             logger.error(f"Ошибка при обработке пользователя {telegram_id}: {e}")
@@ -1065,7 +1105,9 @@ async def async_sync_all_orders(bot):
     logger.info("╔" + "="*78 + "╗")
     logger.info("║" + " "*30 + "ИТОГОВАЯ СТАТИСТИКА" + " "*30 + "║")
     logger.info("╠" + "="*78 + "╣")
-    logger.info(f"║ Отменено ордеров: {total_cancelled:<63} ║")
+    logger.info(f"║ Отменено ордеров (removed): {total_cancelled:<55} ║")
+    logger.info(f"║ Уже удалены ранее (noop): {total_noop:<58} ║")
+    logger.info(f"║ Всего обработано: {total_processed:<63} ║")
     logger.info(f"║ Размещено ордеров: {total_placed:<62} ║")
     logger.info(f"║ Ошибок: {total_errors:<69} ║")
     logger.info("╚" + "="*78 + "╝")

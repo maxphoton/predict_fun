@@ -7,7 +7,7 @@ from aiogram_dialog.widgets.text import Const, Format
 from aiogram_dialog.widgets.kbd import Button, Group, Back, Cancel
 from aiogram_dialog.widgets.input import MessageInput
 
-from database import get_user_orders, get_user, update_order_status, get_order_by_id
+from database import get_user_orders, get_user, update_order_status, get_order_by_hash
 from predict_api import PredictAPIClient
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,9 @@ async def get_orders_list_data(dialog_manager: DialogManager, **kwargs):
     all_orders = await get_user_orders(telegram_id)
     total = len(all_orders)
     
-    # Проверяем, есть ли pending ордера (не отмененные и не исполненные)
+    # Проверяем, есть ли активные ордера (статус OPEN)
     has_active_orders = any(
-        order.get("status") == "pending" 
+        order.get("status") == "OPEN" 
         for order in all_orders
     )
     
@@ -76,7 +76,7 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         text += "You have no orders yet."
     else:
         for i, order in enumerate(orders_page, start_idx + 1):
-            order_id = order.get("order_id", "N/A")
+            order_hash = order.get("order_hash", "N/A")
             market_id = order.get("market_id", "N/A")
             market_title = order.get("market_title", "N/A")
             token_name = order.get("token_name", "N/A")
@@ -84,8 +84,8 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
             target_price = order.get("target_price", 0)
             amount = order.get("amount", 0)
             status = order.get("status", "unknown")
-            # Нормализуем статус: приводим к нижнему регистру и убираем пробелы
-            status = str(status).lower().strip() if status else "unknown"
+            # Статус хранится в верхнем регистре (как в API)
+            status = str(status).upper().strip() if status else "UNKNOWN"
             reposition_threshold_cents = float(order.get("reposition_threshold_cents"))
             
             created_at = order.get("created_at")
@@ -93,12 +93,14 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
             # Берем первые 16 символов для формата "YYYY-MM-DD HH:MM"
             date_str = created_at[:16] if created_at and len(str(created_at)) >= 16 else "N/A"
             
-            # Статус с эмодзи
+            # Статус с эмодзи (соответствует статусам API)
             status_emoji = {
-                "pending": "⏳",
-                "canceled": "🔴",
-                "finished": "✅"
-            }.get(status, "❓")
+                "OPEN": "⏳",
+                "FILLED": "✅",
+                "CANCELLED": "🔴",
+                "EXPIRED": "⏰",
+                "INVALIDATED": "❌"
+            }.get(status.upper() if status else "", "❓")
             
             # Направление с эмодзи
             side_emoji = "📈" if side == "BUY" else "📉"
@@ -107,9 +109,9 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
             target_price_cents = target_price * 100
             price_str = f"{target_price_cents:.2f}".rstrip('0').rstrip('.')
             
-            text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_id}</code>
+            text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
    {side_emoji} {side} {token_name} | {price_str}¢ | {amount} USDT
-   📊 Market ID: {market_id} | {market_title[:25]}...
+   📊 Market title: {market_title[:50] if market_title else 'N/A'}...
    ⚙️ Reposition threshold: {reposition_threshold_cents:.2f}¢
    📅 {date_str}
 
@@ -190,26 +192,26 @@ async def cancel_order_input_handler(message: Message, message_input: MessageInp
         # Если режим отмены не активен, игнорируем сообщение
         return
     
-    order_id = message.text.strip()
+    order_hash = message.text.strip()
     
-    if not order_id:
-        await message.answer("❌ Please enter order ID.")
+    if not order_hash:
+        await message.answer("❌ Please enter order hash.")
         return
     
     # Получаем telegram_id напрямую из сообщения
     telegram_id = message.from_user.id
     
     # Проверяем, что ордер существует и принадлежит пользователю
-    order = await get_order_by_id(order_id)
+    order = await get_order_by_hash(order_hash)
     if not order:
-        await message.answer(f"❌ Order <code>{order_id}</code> not found in database.")
+        await message.answer(f"❌ Order <code>{order_hash}</code> not found in database.")
         manager.dialog_data["cancel_mode"] = False
         return
     
     # Проверяем, что пользователь является владельцем ордера
     if order.get("telegram_id") != telegram_id:
         await message.answer(f"❌ You don't have permission to cancel this order. The order belongs to another user.")
-        logger.warning(f"User {telegram_id} attempted to cancel another user's order {order_id} (owner: {order.get('telegram_id')})")
+        logger.warning(f"User {telegram_id} attempted to cancel another user's order {order_hash} (owner: {order.get('telegram_id')})")
         manager.dialog_data["cancel_mode"] = False
         return
     
@@ -229,62 +231,50 @@ async def cancel_order_input_handler(message: Message, message_input: MessageInp
     
     try:
         # Получаем ордер из API по hash (hash хранится в БД)
-        found_order = await api_client.get_order_by_id(order_hash=order_id)
-        
-        if not found_order:
+        # Используем order_api_id из БД для отмены
+        order_api_id = order.get('order_api_id')
+        if not order_api_id:
             await message.answer(
-                f"❌ Order <code>{order_id}</code> not found in API. "
-                f"It may have been already cancelled or filled."
-            )
-            # Обновляем статус в БД на canceled (на случай если ордер был отменен вручную)
-            await update_order_status(order_id, "canceled")
-            manager.dialog_data["cancel_mode"] = False
-            return
-        
-        # Получаем order.id для off-chain отмены
-        order_id_for_cancel = found_order.get('id')
-        if not order_id_for_cancel:
-            await message.answer(
-                f"❌ Order <code>{order_id}</code> does not have an ID for cancellation. "
-                f"It may have been already cancelled or filled."
+                f"❌ Order <code>{order_hash}</code> does not have an API ID for cancellation. "
+                f"It may be an old order. Please try again later."
             )
             manager.dialog_data["cancel_mode"] = False
             return
-        
+
         # Отменяем ордер через REST API (off-chain отмена, не требует газа)
-        result = await api_client.cancel_orders(order_ids=[order_id_for_cancel])
+        result = await api_client.cancel_orders(order_ids=[order_api_id])
         
         if result.get('success', False):
             # Проверяем, был ли ордер удален
             removed = result.get('removed', [])
-            if order_id_for_cancel in removed:
+            if order_api_id in removed:
                 # Обновляем статус в БД
-                await update_order_status(order_id, "canceled")
-                await message.answer(f"✅ Order <code>{order_id}</code> successfully cancelled.")
-                logger.info(f"User {telegram_id} cancelled order {order_id}")
+                await update_order_status(order_hash, "CANCELLED")
+                await message.answer(f"✅ Order <code>{order_hash}</code> successfully cancelled.")
+                logger.info(f"User {telegram_id} cancelled order {order_hash}")
             else:
                 # Ордер уже был удален/исполнен/отменен
                 noop = result.get('noop', [])
-                if order_id_for_cancel in noop:
+                if order_api_id in noop:
                     await message.answer(
-                        f"ℹ️ Order <code>{order_id}</code> was already cancelled or filled."
+                        f"ℹ️ Order <code>{order_hash}</code> was already cancelled or filled."
                     )
-                    await update_order_status(order_id, "canceled")
-                    logger.info(f"Order {order_id} was already cancelled/filled for user {telegram_id}")
+                    await update_order_status(order_hash, "CANCELLED")
+                    logger.info(f"Order {order_hash} was already cancelled/filled for user {telegram_id}")
                 else:
                     await message.answer(
-                        f"❌ Failed to cancel order <code>{order_id}</code>. "
+                        f"❌ Failed to cancel order <code>{order_hash}</code>. "
                         f"Order was not removed from orderbook."
                     )
-                    logger.warning(f"Failed to cancel order {order_id} for user {telegram_id}: order not in removed or noop")
+                    logger.warning(f"Failed to cancel order {order_hash} for user {telegram_id}: order not in removed or noop")
         else:
-            error_message = f"❌ Failed to cancel order <code>{order_id}</code>."
+            error_message = f"❌ Failed to cancel order <code>{order_hash}</code>."
             await message.answer(error_message)
-            logger.warning(f"Failed to cancel order {order_id} for user {telegram_id}: API returned success=False")
+            logger.warning(f"Failed to cancel order {order_hash} for user {telegram_id}: API returned success=False")
             
     except Exception as e:
-        await message.answer(f"❌ Error cancelling order <code>{order_id}</code>: {str(e)}")
-        logger.error(f"Error cancelling order {order_id} for user {telegram_id}: {e}", exc_info=True)
+        await message.answer(f"❌ Error cancelling order <code>{order_hash}</code>: {str(e)}")
+        logger.error(f"Error cancelling order {order_hash} for user {telegram_id}: {e}", exc_info=True)
     
     # Отключаем режим отмены
     manager.dialog_data["cancel_mode"] = False
@@ -328,14 +318,14 @@ async def orders_search_handler(message: Message, message_input: MessageInput, m
     # Выполняем поиск
     search_results = []
     for order in all_orders:
-        # Поиск по order_id, market_id, token_name, side
-        order_id = str(order.get("order_id", "")).lower()
+        # Поиск по order_hash, market_id, token_name, side
+        order_hash = str(order.get("order_hash", "")).lower()
         market_id = str(order.get("market_id", "")).lower()
         market_title = str(order.get("market_title", "")).lower()
         token_name = str(order.get("token_name", "")).lower()
         side = str(order.get("side", "")).lower()
         
-        if (query in order_id or 
+        if (query in order_hash or 
             query in market_id or 
             query in market_title or 
             query in token_name or 
@@ -380,7 +370,7 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
 """
     
     for i, order in enumerate(orders_page, start_idx + 1):
-        order_id = order.get("order_id", "N/A")
+        order_hash = order.get("order_hash", "N/A")
         market_id = order.get("market_id", "N/A")
         market_title = order.get("market_title", "N/A")
         token_name = order.get("token_name", "N/A")
@@ -388,8 +378,8 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         target_price = order.get("target_price", 0)
         amount = order.get("amount", 0)
         status = order.get("status", "unknown")
-        # Нормализуем статус: приводим к нижнему регистру и убираем пробелы
-        status = str(status).lower().strip() if status else "unknown"
+        # Статус хранится в верхнем регистре (как в API)
+        status = str(status).upper().strip() if status else "UNKNOWN"
         reposition_threshold_cents = float(order.get("reposition_threshold_cents"))
         
         created_at = order.get("created_at")
@@ -397,11 +387,13 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         # Берем первые 16 символов для формата "YYYY-MM-DD HH:MM"
         date_str = created_at[:16] if created_at and len(str(created_at)) >= 16 else "N/A"
         
-        # Статус с эмодзи
+        # Статус с эмодзи (соответствует статусам API)
         status_emoji = {
-            "pending": "⏳",
-            "canceled": "🔴",
-            "finished": "✅"
+            "OPEN": "⏳",
+            "FILLED": "✅",
+            "CANCELLED": "🔴",
+            "EXPIRED": "⏰",
+            "INVALIDATED": "❌"
         }.get(status, "❓")
         
         # Направление с эмодзи
@@ -411,9 +403,9 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         target_price_cents = target_price * 100
         price_str = f"{target_price_cents:.2f}".rstrip('0').rstrip('.')
         
-        text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_id}</code>
+        text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
    {side_emoji} {side} {token_name} | {price_str}¢ | {amount} USDT
-   📊 Market ID: {market_id} | {market_title[:25]}...
+   📊 Market title: {market_title[:50] if market_title else 'N/A'}...
    ⚙️ Reposition threshold: {reposition_threshold_cents:.2f}¢
    📅 {date_str}
 
@@ -458,7 +450,7 @@ async def on_search_results_back(callback: CallbackQuery, button: Button, manage
 
 
 orders_search_window = Window(
-    Const("Enter search query:\n(order_id, market_id, market_title, token_name, side)"),
+    Const("Enter search query:\n(order_hash, market_id, market_title, token_name, side)"),
     MessageInput(orders_search_handler),
     Group(
         Back(Const("◀️ Back")),
