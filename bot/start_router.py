@@ -120,7 +120,7 @@ The data is never used in its raw form and is not shared with third parties.
 
 Please enter your wallet address (Deposit Address) from the Portfolio page:
 
-<a href="https://predict.fun/portfolio/">https://predict.fun/portfolio/</a>
+<a href="https://predict.fun/">https://predict.fun/</a>
 
 ⚠️ Important: You must specify the wallet address for which you received the API key."""
     )
@@ -193,13 +193,19 @@ Please enter a different private key:"""
     except Exception:
         pass
     
-    await message.answer("""Please enter your Predict.fun API key.
+    # Send image with caption for API key
+    photo_path = Path(__file__).parent.parent / "files" / "api.png"
+    photo = FSInputFile(str(photo_path))
+    await message.answer_photo(
+        photo,
+        caption="""Please enter your Predict.fun API key.
 
 You can get an API key by opening a ticket in Discord:
 
 <a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
 
-⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1.""")
+⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1."""
+    )
     await state.set_state(RegistrationStates.waiting_api_key)
 
 

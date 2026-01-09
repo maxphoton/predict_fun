@@ -2,7 +2,6 @@
 Настройки для телеграм бота.
 """
 from typing import Optional
-from pydantic import ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,14 +11,6 @@ class Settings(BaseSettings):
     master_key: str  # 32 bytes hex для шифрования
     rpc_url: str  # URL RPC ноды BNB Chain
     admin_telegram_id: int = 0  # ID администратора для команды /get_db
-    
-    # Прокси для всех API запросов (опционально)
-    # Формат: host:port:username:password (например: 91.216.186.156:8000:Ym81H9:ysZcvQ)
-    proxy: Optional[str] = None
-    
-    # Опциональные параметры для PredictDotFun SDK
-    conditional_token_addr: str = "0xAD1a38cEc043e70E83a3eC30443dB285ED10D774"
-    multisend_addr: str = "0x998739BFdAAdde7C933B942a68053933098f9EDa"
     
     model_config = SettingsConfigDict(
         env_file=".env",

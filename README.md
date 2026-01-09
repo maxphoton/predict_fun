@@ -1,10 +1,11 @@
 # predict.fun Market Making Bot
 
-A Telegram bot for placing limit orders on [predict.fun](https://app.opinion.trade) prediction markets. The bot provides an intuitive interface for market making strategies with secure credential management, invite-based access control, and automatic order synchronization.
+A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) prediction markets. The bot provides an intuitive interface for market making strategies with secure credential management, invite-based access control, and automatic order synchronization.
 
 ## Features
 
 ### 🔐 Secure Registration with Invite System
+- **⚠️ Important Prerequisite**: Before registration, you must complete at least one trade through the web interface on [predict.fun](https://predict.fun/) to set up token approvals in your wallet
 - **Invite-Based Access**: Registration requires a valid invite code (10-character alphanumeric)
 - **Encrypted Storage**: All sensitive data (wallet address, private key, API key) is encrypted using AES-GCM encryption
 - **Async SQLite Database**: User credentials are stored locally in an encrypted SQLite database using `aiosqlite` for non-blocking operations
@@ -16,6 +17,7 @@ A Telegram bot for placing limit orders on [predict.fun](https://app.opinion.tra
   - Important notes during registration about matching wallet, private key, and API key
 - **Connection Testing**: API connection is tested at the end of registration using `get_my_orders` before saving user data
 - **Error Handling**: User-friendly error messages with error codes and timestamps for support reference
+- **Visual Guides**: Step-by-step registration with screenshots showing where to find wallet address, private key, and API key
 
 ### 🎫 Invite Management (Admin Only)
 - **Invite Generation**: Admin command `/get_invites` generates and displays 10 unused invite codes
@@ -47,16 +49,16 @@ A Telegram bot for placing limit orders on [predict.fun](https://app.opinion.tra
 - **Price Offset in Cents**: Set order prices relative to best bid using intuitive cent-based offsets
 - **Direction Selection**: Choose BUY (below current price) or SELL (above current price, can be used to sell shares)
 - **Order Confirmation**: Review all settings before placing orders
-- **Order Status Tracking**: View order status (pending, finished, canceled)
+- **Order Status Tracking**: View order status (OPEN, FILLED, CANCELLED, EXPIRED, INVALIDATED) aligned with API statuses
 - **Bot-Only Orders**: Only orders created through the bot can be managed; manually placed orders are not displayed
 - **Execution Notifications**: Automatic notifications when orders are executed with execution details
 
 ### 🔄 Automatic Order Synchronization
 - **Background Task**: Automatically synchronizes orders every 60 seconds
 - **Order Status Monitoring**: Checks order status via API before processing
-  - Automatically updates database when orders are filled or cancelled externally
+  - Automatically updates database when orders are filled, cancelled, expired, or invalidated externally
   - Sends notifications for filled orders with order details (price, market link)
-  - Silently updates cancelled orders without notifications
+  - Silently updates cancelled/expired/invalidated orders without notifications
 - **Price Tracking**: Monitors market price changes and maintains constant offset from current price
 - **Smart Updates**: Only moves orders when price change exceeds configurable threshold (default 0.5 cents)
 - **Batch Operations**: Efficiently cancels and places orders in batches per user
@@ -107,10 +109,12 @@ A Telegram bot for placing limit orders on [predict.fun](https://app.opinion.tra
 
 - Python 3.13+
 - Telegram Bot Token (from [@BotFather](https://t.me/botfather))
-- PredictDotFun Labs API Key (obtain from [the form](https://docs.google.com/forms/d/1h7gp8UffZeXzYQ-lv4jcou9PoRNOqMAQhyW4IwZDnII/viewform?edit_requested=true))
+- Predict.fun API Key (obtain by opening a ticket in [Discord](https://discord.gg/predictdotfun))
 - BNB Chain RPC URL
-- Wallet address and private key for predict.fun
+- Wallet address (Deposit Address from Portfolio page on [predict.fun](https://predict.fun/))
+- Private key (Privy Wallet Private Key from [Account Settings](https://predict.fun/account/settings))
 - Admin Telegram ID (for invite management)
+- ⚠️ **Important**: Complete at least one trade through the web interface before using the bot
 
 ### Installation
 
@@ -131,7 +135,6 @@ BOT_TOKEN=your_telegram_bot_token
 MASTER_KEY=your_32_byte_hex_encryption_key
 RPC_URL=your_bnb_chain_rpc_url
 ADMIN_TELEGRAM_ID=your_telegram_user_id
-PROXY=host:port:username:password  # Optional
 ```
 
 4. Generate a master key for encryption:
@@ -148,16 +151,31 @@ python main.py
 
 ## Usage
 
+### ⚠️ Prerequisites
+
+**Before registering in the bot**, you must:
+1. Complete at least one trade through the web interface on [predict.fun](https://predict.fun/)
+2. This is necessary to set up token approvals (permissions) in your wallet
+3. Without this, the bot will not be able to place orders
+
 ### Registration
 
 1. Start the bot with `/start`
 2. Enter your invite code (10-character alphanumeric code)
-3. Enter your Balance spot address from your [predict.fun profile](https://app.opinion.trade?code=BJea79)
+3. Enter your **Wallet Address (Deposit Address)**
+   - 📍 **Where to find**: Portfolio page on [predict.fun](https://predict.fun/)
+   - 💡 This is your Predict Account (smart wallet) address
    - ⚠️ **Important**: Must be the wallet address for which the API key was obtained
-4. Enter your private key
+4. Enter your **Private Key (Privy Wallet Private Key)**
+   - 📍 **Where to find**: [Account Settings page](https://predict.fun/account/settings)
+   - 💡 This is the private key of the Privy Wallet that owns your Predict Account
    - ⚠️ **Important**: Must correspond to the wallet address from step 3
-5. Enter your PredictDotFun Labs API key
+5. Enter your **API Key**
+   - 📍 **Where to find**: Open a ticket in the [predict.fun Discord server](https://discord.gg/predictdotfun)
+   - 💡 Request an API key for your wallet through Discord
    - ⚠️ **Important**: Must be the API key obtained for the wallet from step 3
+
+⚠️ **Critical**: All three parameters must belong to the **same wallet**. An API key from another wallet will not allow placing orders.
 
 All data is encrypted and stored securely. The bot validates:
 - Uniqueness of wallet address, private key, and API key
@@ -176,7 +194,7 @@ The invite code is validated and used atomically at the end of registration only
 ### Placing Orders
 
 1. Use `/make_market` to start the order placement flow
-2. Enter a market URL from predict.fun (e.g., `https://app.opinion.trade/detail?topicId=155`)
+2. Enter a market URL from [predict.fun](https://predict.fun/)
 3. For categorical markets, select a submarket
 4. Review market information (spread, liquidity, best bids/asks)
 5. Enter the farming amount in USDT
@@ -193,7 +211,7 @@ The invite code is validated and used atomically at the end of registration only
 2. Browse orders with pagination (10 orders per page)
 3. Use the search function to find specific orders
 4. Cancel orders by entering the order ID (order list remains visible for easy copying)
-5. View order details: status (pending/finished/canceled), price, amount, market, creation date
+5. View order details: status (OPEN/FILLED/CANCELLED/EXPIRED/INVALIDATED), price, amount, market, creation date
 
 ⚠️ **Note**: You can only manage orders that were created through the bot. Orders placed manually on the platform are not displayed.
 
@@ -226,7 +244,6 @@ bot/
 ├── config.py                # Configuration and settings management
 ├── database.py              # Async database operations (aiosqlite)
 ├── aes.py                   # AES-GCM encryption utilities
-├── client_factory.py         # PredictDotFun SDK client creation and proxy setup
 ├── spam_protection.py       # Anti-spam middleware
 ├── logger_config.py         # Logging configuration and setup
 ├── help_text.py             # Multi-language help text (English, Russian, Chinese)
@@ -234,8 +251,11 @@ bot/
 ├── market_router.py         # Market order placement flow (/make_market command)
 ├── orders_dialog.py         # Order management dialog (/orders command)
 ├── sync_orders.py           # Automatic order synchronization background task
-├── opinion_api_wrapper.py   # PredictDotFun API wrapper functions (async)
 ├── invites.py               # Invite management functions
+├── predict_api/             # New API client implementation
+│   ├── client.py            # REST API client (PredictAPIClient)
+│   ├── sdk_operations.py    # SDK operations (balance, signing, cancellation)
+│   └── auth.py              # JWT authentication
 └── users.db                 # SQLite database (created automatically)
 ```
 
@@ -248,7 +268,7 @@ The bot uses a modular router-based architecture:
 - **Background Tasks**: Order synchronization runs as an independent async task
 - **Dialogs**: Complex multi-step interactions use `aiogram-dialog` for better UX
 - **Middleware**: Global anti-spam protection for all messages and callbacks
-- **API Wrapper**: Centralized async wrapper for PredictDotFun API calls
+- **API Client**: Uses `PredictAPIClient` (REST API) and `predict_sdk.OrderBuilder` (SDK) for all API operations
 
 ## Security
 
@@ -267,7 +287,6 @@ The bot supports the following environment variables:
 - `MASTER_KEY`: 32-byte hex key for encryption (required)
 - `RPC_URL`: BNB Chain RPC endpoint (required)
 - `ADMIN_TELEGRAM_ID`: Telegram user ID for admin commands (required for invite management)
-- `PROXY`: Proxy configuration in format `host:port:username:password` (optional)
 
 ## Commands
 
@@ -288,9 +307,9 @@ The bot supports the following environment variables:
 The bot automatically synchronizes your orders every 60 seconds:
 
 ### How it works:
-1. **Status Check**: For each pending order, checks status via API
-   - If order is finished: updates database to 'finished', sends notification with order details (price, market link)
-   - If order is canceled: updates database to 'canceled', skips processing silently (no notification)
+1. **Status Check**: For each OPEN order, checks status via API
+   - If order is FILLED: updates database to 'FILLED', sends notification with order details (price, market link)
+   - If order is CANCELLED/EXPIRED/INVALIDATED: updates database accordingly, skips processing silently (no notification)
    - If status check fails: continues with normal processing (graceful degradation)
 
 2. **Price Monitoring**: Monitors market prices and maintains a constant offset (in ticks) between the current market price and your order's target price
@@ -317,11 +336,13 @@ The bot automatically synchronizes your orders every 60 seconds:
 - `aiogram==3.23.0` - Telegram Bot API framework
 - `aiogram-dialog==2.4.0` - Dialog system for complex interactions
 - `aiosqlite==0.22.0` - Async SQLite driver for non-blocking database operations
-- `opinion-clob-sdk==0.4.3` - predict.fun SDK for market interactions
+- `predict-sdk==0.0.8` - predict.fun SDK for market interactions (on-chain operations, order signing)
 - `cryptography==46.0.3` - AES-GCM encryption
 - `pydantic==2.12.5` - Settings management
 - `pydantic-settings==2.12.0` - Environment variable settings
 - `python-dotenv==1.2.1` - Environment variable loading
+- `eth-account==0.13.7` - Ethereum account management
+- `requests==2.32.5` - HTTP client for REST API
 
 ## Technical Details
 
@@ -329,7 +350,7 @@ The bot automatically synchronizes your orders every 60 seconds:
 - All database operations use `aiosqlite` for true async I/O
 - API calls are wrapped in `asyncio.to_thread()` to prevent blocking
 - Background tasks run independently without blocking the main event loop
-- PredictDotFun API wrapper provides async interface for synchronous SDK
+- Uses `PredictAPIClient` (REST API) and `predict_sdk.OrderBuilder` (SDK) for all API operations
 
 ### Order Synchronization Algorithm
 1. Retrieves all users from the database
@@ -362,9 +383,9 @@ The bot automatically synchronizes your orders every 60 seconds:
   - `telegram_id` (PRIMARY KEY): User's Telegram ID
   - All sensitive data encrypted with AES-GCM
   - Unique constraints on wallet address, private key, and API key
-- **orders**: Order information (order_id, market_id, prices, amounts, status, etc.)
-  - Status values: `pending`, `finished`, `canceled` (aligned with API terminology)
-  - Default status: `pending`
+- **orders**: Order information (order_hash, order_api_id, market_slug, prices, amounts, status, etc.)
+  - Status values: `OPEN`, `FILLED`, `CANCELLED`, `EXPIRED`, `INVALIDATED` (aligned with API terminology)
+  - Default status: `OPEN`
   - Migration function updates old statuses automatically
 - **invites**: Invite codes and usage tracking
 
