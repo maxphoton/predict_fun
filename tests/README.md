@@ -11,7 +11,7 @@
   - `TestAPIBaseURL` - Проверка использования правильного API URL
   - `TestIntegration` - Интеграционные тесты
 - `test_sdk_operations.py` - Тесты для SDK операций `bot/predict_api/sdk_operations.py` (mainnet)
-- `test_sync_orders.py` - Тесты для синхронизации ордеров
+- `test_sync_orders.py` - Тесты для синхронизации ордеров `bot/sync_orders.py` (unit-тесты с моками)
 
 ## Запуск тестов
 
@@ -25,11 +25,15 @@ pytest tests/test_predict_api_client.py -v
 # Запустить только тесты SDK операций (mainnet)
 pytest tests/test_sdk_operations.py -v
 
+# Запустить только тесты синхронизации ордеров (unit-тесты)
+pytest tests/test_sync_orders.py -v
+
 # Запустить с подробным выводом
 pytest tests/test_predict_api_client.py -v -s
 
 # Запустить конкретный тест
 pytest tests/test_predict_api_client.py::TestPublicMethods::test_get_markets -v
+pytest tests/test_sync_orders.py::TestProcessUserOrders::test_reposition_sufficient_change -v
 ```
 
 ## Настройка для тестирования
@@ -166,6 +170,160 @@ MAINNET_RPC_URL = os.getenv('RPC_URL', 'https://bsc-dataseed.binance.org/')
    - Требует реальные ордера для отмены
    - Выполняет on-chain транзакцию (требует газа)
 
+### Тесты синхронизации ордеров (unit-тесты)
+
+Файл `test_sync_orders.py` содержит unit-тесты для `bot/sync_orders.py` с использованием моков.
+
+**Особенности:**
+- ✅ Все тесты используют моки - не требуют реальной БД или API
+- ✅ Не требуют credentials или настройки окружения
+- ✅ Быстро выполняются (нет реальных API вызовов)
+- ✅ Покрывают различные сценарии синхронизации ордеров
+- ✅ Включают тесты граничных случаев и обработки ошибок
+- ✅ Покрывают все функции отправки уведомлений
+
+#### Структура тестов
+
+1. **`TestCalculateNewTargetPrice`** - Тесты расчета целевой цены:
+   - Расчет цены для BUY ордеров
+   - Расчет цены для SELL ордеров
+   - Ограничения минимальной и максимальной цены (0.001 - 0.999)
+
+2. **`TestGetCurrentMarketPrice`** - Тесты получения текущей цены рынка:
+   - Получение цены для BUY YES токена (best_bid)
+   - Получение цены для SELL YES токена (best_ask)
+   - Получение цены для NO токена (1 - price_yes)
+   - Обработка отсутствия orderbook
+   - Обработка пустых bids/asks
+
+3. **`TestProcessUserOrders`** - Основные тесты обработки ордеров пользователя:
+   - `test_no_user` - пользователь не найден (нет ордеров)
+   - `test_no_orders` - у пользователя нет активных ордеров
+   - `test_reposition_sufficient_change` - изменение цены достаточно для перестановки
+   - `test_reposition_insufficient_change` - изменение недостаточно для перестановки
+   - `test_order_status_filled` - ордер был исполнен (статус FILLED)
+   - `test_order_status_cancelled` - ордер был отменен (статус CANCELLED)
+   - `test_order_status_expired` - ордер истек (статус EXPIRED)
+   - `test_order_status_invalidated` - ордер инвалидирован (статус INVALIDATED)
+   - `test_unknown_status_from_api` - неизвестный статус из API
+   - `test_no_price_change` - цена не изменилась
+   - `test_multiple_orders_mixed` - несколько ордеров, часть переставляется
+   - `test_notification_only_when_repositioning` - уведомления только при перестановке
+   - `test_notification_structure` - проверка структуры уведомлений
+
+4. **`TestCancellationErrorNotification`** - Тесты уведомлений об ошибках отмены:
+   - Отправка уведомления для одного ордера
+   - Отправка уведомления для нескольких ордеров
+   - Обработка пустого списка
+   - Обработка отсутствующих полей
+   - Обработка ошибок при отправке
+
+5. **`TestOrderPlacementErrorNotification`** - Тесты уведомлений об ошибках размещения:
+   - Уведомление для BUY ордера
+   - Уведомление для SELL ордера
+   - Обработка отсутствующих полей
+   - Обработка ошибок при отправке
+
+6. **`TestCancelOrdersBatch`** - Тесты батч-отмены ордеров:
+   - `test_cancel_orders_with_noop` - отмена с noop ордерами (уже удаленными)
+   - `test_cancel_orders_all_removed` - все ордера успешно удалены
+   - `test_cancel_orders_all_noop` - все ордера уже были удалены ранее
+   - `test_cancel_orders_failure` - ошибка при отмене ордеров
+
+7. **`TestPlaceOrdersBatch`** - Тесты батч-размещения ордеров:
+   - `test_place_orders_with_price_recalculation` - размещение с пересчетом цены
+   - `test_place_orders_without_price_recalculation` - размещение без пересчета
+
+8. **`TestGetCurrentMarketPriceEdgeCases`** - Тесты граничных случаев получения цены:
+   - `test_get_price_network_error` - ошибка сети при получении orderbook
+   - `test_get_price_invalid_orderbook_structure` - некорректная структура orderbook
+   - `test_get_price_invalid_price_format` - некорректный формат цены в bids/asks
+   - `test_get_price_empty_asks_for_sell` - пустые asks для SELL ордера
+
+9. **`TestProcessUserOrdersEdgeCases`** - Тесты граничных случаев обработки ордеров:
+   - `test_missing_required_fields` - отсутствие обязательных полей в ордере
+   - `test_status_check_timeout` - таймаут при проверке статуса ордера (graceful degradation)
+   - `test_get_price_failure_continues` - ошибка получения цены, обработка продолжается для других ордеров
+
+10. **`TestNotificationFunctions`** - Тесты функций отправки уведомлений:
+    - `test_send_price_change_notification` - отправка уведомления о смещении цены
+    - `test_send_order_updated_notification` - отправка уведомления об успешном обновлении ордера
+    - `test_send_order_filled_notification` - отправка уведомления об исполнении ордера
+
+11. **`TestCancelOrdersBatchEdgeCases`** - Тесты граничных случаев батч-отмены:
+    - `test_cancel_orders_empty_list` - пустой список ордеров для отмены
+    - `test_cancel_orders_exception` - исключение при отмене ордеров
+
+12. **`TestPlaceOrdersBatchEdgeCases`** - Тесты граничных случаев батч-размещения:
+    - `test_place_orders_missing_order_builder` - отсутствие order_builder в параметрах
+    - `test_place_orders_invalid_side_type` - некорректный тип side
+    - `test_place_orders_get_market_error` - ошибка при получении данных рынка (использование дефолтных значений)
+
+#### Статусы ордеров
+
+Тесты проверяют обработку всех статусов ордеров из нового API:
+- **OPEN** - открытый/активный ордер
+- **FILLED** - исполненный ордер
+- **CANCELLED** - отмененный ордер
+- **EXPIRED** - истекший ордер
+- **INVALIDATED** - инвалидированный ордер
+
+#### Логика с noop ордерами
+
+Тесты проверяют логику обработки ордеров, которые уже были удалены/исполнены ранее:
+- `total_processed = len(removed) + len(noop)` - все обработанные ордера
+- Размещение новых ордеров происходит только если `total_processed == len(orders_to_cancel)`
+
+#### Пересчет цены перед размещением
+
+Тесты проверяют, что цена пересчитывается перед размещением ордера:
+- Используется актуальная текущая цена рынка
+- Пересчет выполняется с учетом `offset_ticks`
+- Обновляются `current_price_at_creation` и `target_price` в params
+
+#### Обработка ошибок и граничные случаи
+
+Тесты проверяют устойчивость системы к различным ошибкам:
+- **Ошибки сети**: таймауты, network errors при получении orderbook
+- **Некорректные данные**: некорректная структура orderbook, невалидные цены
+- **Отсутствие данных**: пустые bids/asks, отсутствие обязательных полей
+- **Graceful degradation**: обработка продолжается при ошибках проверки статуса
+- **Обработка исключений**: корректная обработка исключений в батч-операциях
+
+#### Моки API
+
+Тесты используют моки для:
+- `PredictAPIClient` - клиент API
+- `get_user_orders` - получение ордеров из БД
+- `get_order_by_id` - проверка статуса ордера через API
+- `get_current_market_price` - получение текущей цены
+- `cancel_orders` - отмена ордеров
+- `place_single_order` - размещение ордера
+- `update_order_status` - обновление статуса в БД
+- `send_order_filled_notification` - уведомление об исполнении
+- `OrderBuilder` - построитель ордеров
+
+**Структура моков API:**
+```python
+# Структура ответа get_order_by_id (согласно документации API)
+{
+    'status': 'OPEN'|'FILLED'|'CANCELLED'|'EXPIRED'|'INVALIDATED',
+    'id': str,  # order_api_id
+    'order': {'hash': str, 'side': 0|1},  # 0=BUY, 1=SELL
+    'marketId': int,
+    'amount': str,
+    'amountFilled': str,
+    'currency': 'USDT'
+}
+
+# Структура ответа cancel_orders
+{
+    'success': bool,
+    'removed': List[str],  # ID успешно удаленных ордеров
+    'noop': List[str]       # ID ордеров, которые уже были удалены
+}
+```
+
 ## Примечания
 
 - На testnet не требуется API key для публичных методов
@@ -183,6 +341,38 @@ MAINNET_RPC_URL = os.getenv('RPC_URL', 'https://bsc-dataseed.binance.org/')
 - Установка approvals **требует газа** (on-chain транзакции)
 
 ## Изменения в тестах
+
+### Обновления test_sync_orders.py
+
+**Обновлено в соответствии с новой реализацией синхронизации:**
+
+1. **Новые статусы ордеров:**
+   - Используются API статусы: `OPEN`, `FILLED`, `CANCELLED`, `EXPIRED`, `INVALIDATED`
+   - Вместо старых: `pending`, `finished`, `canceled`
+
+2. **Обновлена структура данных ордеров:**
+   - `order_id` → `order_hash` и `order_api_id`
+   - Добавлены поля: `market_title`, `market_slug`
+   - Используется `order_api_id` для отмены ордеров
+
+3. **Новые тесты:**
+   - Тесты для статусов `EXPIRED` и `INVALIDATED`
+   - Тесты для обработки неизвестных статусов
+   - Тесты для логики с `noop` ордерами
+   - Тесты для пересчета цены перед размещением
+   - Тесты граничных случаев получения цены (ошибки сети, некорректные данные)
+   - Тесты граничных случаев обработки ордеров (отсутствие полей, таймауты)
+   - Тесты для всех функций отправки уведомлений
+   - Тесты граничных случаев батч-операций (пустые списки, исключения)
+
+4. **Обновлены моки API:**
+   - Структура ответов соответствует официальной документации API
+   - Моки для `get_order_by_id` включают все необходимые поля
+   - Моки для `cancel_orders` включают `removed` и `noop`
+
+5. **Импорты:**
+   - `calculate_new_target_price` теперь импортируется из `predict_api.sdk_operations`
+   - Добавлены константы статусов: `ORDER_STATUS_OPEN`, `ORDER_STATUS_FILLED`, и т.д.
 
 ### Удаленные тесты
 
