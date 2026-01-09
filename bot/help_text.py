@@ -8,7 +8,7 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 Бот автоматически поддерживает лимитные ордера, не давая им исполниться. Когда текущая цена приближается к цене ордера, бот автоматически переставляет ордер на безопасное расстояние.
 
 ⚠️ <b>ВАЖНО: Перед использованием бота</b>
-Перед регистрацией в боте необходимо <b>совершить хотя бы одну сделку через веб-интерфейс</b> на <a href="https://predict.fun/">predict.fun</a>. Это необходимо для установки approvals (разрешений) для токенов в вашем кошельке. Без этого бот не сможет размещать ордера.
+Перед регистрацией в боте необходимо <b>совершить хотя бы одну сделку через веб-интерфейс</b> на <a href="https://predict.fun?ref=73581">predict.fun</a>. Это необходимо для установки approvals (разрешений) для токенов в вашем кошельке. Без этого бот не сможет размещать ордера.
 
 <b>🔐 Регистрация (/start):</b>
 При регистрации вам понадобятся три параметра от одного и того же кошелька:
@@ -20,7 +20,7 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 
 2. <b>Приватный ключ (Privy Wallet Private Key)</b>
    📍 Где взять: Страница настроек аккаунта (Account Settings)
-   🔗 Ссылка: <a href="https://predict.fun/account/settings">https://predict.fun/account/settings</a>
+   🔗 Ссылка: <a href="https://predict.fun/account/settings?ref=73581">https://predict.fun/account/settings</a>
    💡 Это приватный ключ от Privy Wallet, который владеет вашим Predict Account
 
 3. <b>API ключ</b>
@@ -31,7 +31,7 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 ⚠️ <b>Критически важно:</b> Все три параметра должны относиться к <b>одному и тому же кошельку</b>. API ключ от другого кошелька не позволит размещать ордера.
 
 <b>📊 Размещение ордера (/make_market):</b>
-1. Введите ссылку на маркет <a href="https://predict.fun/">predict.fun</a>
+1. Введите ссылку на маркет <a href="https://predict.fun?ref=73581">predict.fun</a>
 2. Если маркет категориальный — выберите подмаркет
 3. Введите сумму в USDT (например: 10)
 4. Выберите сторону: ✅ YES или ❌ NO
@@ -71,19 +71,19 @@ HELP_TEXT_ENG = """📖 <b>Bot Usage Instructions</b>
 The bot automatically maintains limit orders, preventing them from being executed. When the current price approaches the order price, the bot automatically repositions the order to a safe distance.
 
 ⚠️ <b>IMPORTANT: Before Using the Bot</b>
-Before registering in the bot, you must <b>complete at least one trade through the web interface</b> on <a href="https://predict.fun/">predict.fun</a>. This is necessary to set up approvals (permissions) for tokens in your wallet. Without this, the bot will not be able to place orders.
+Before registering in the bot, you must <b>complete at least one trade through the web interface</b> on <a href="https://predict.fun?ref=73581">predict.fun</a>. This is necessary to set up approvals (permissions) for tokens in your wallet. Without this, the bot will not be able to place orders.
 
 <b>🔐 Registration (/start):</b>
 When registering, you will need three parameters from the same wallet:
 
 1. <b>Wallet Address (Deposit Address)</b>
-   📍 Where to find: Portfolio page on <a href="https://predict.fun/">predict.fun</a>
-   🔗 Link: <a href="https://predict.fun/">https://predict.fun/</a>
+   📍 Where to find: Portfolio page on <a href="https://predict.fun?ref=73581">predict.fun</a>
+   🔗 Link: <a href="https://predict.fun?ref=73581">https://predict.fun</a>
    💡 This is your Predict Account (smart wallet) address
 
 2. <b>Private Key (Privy Wallet Private Key)</b>
    📍 Where to find: Account Settings page
-   🔗 Link: <a href="https://predict.fun/account/settings">https://predict.fun/account/settings</a>
+   🔗 Link: <a href="https://predict.fun/account/settings?ref=73581">https://predict.fun/account/settings</a>
    💡 This is the private key of the Privy Wallet that owns your Predict Account
 
 3. <b>API Key</b>
@@ -94,7 +94,7 @@ When registering, you will need three parameters from the same wallet:
 ⚠️ <b>Critical:</b> All three parameters must belong to the <b>same wallet</b>. An API key from another wallet will not allow placing orders.
 
 <b>📊 Placing an Order (/make_market):</b>
-1. Enter the <a href="https://predict.fun/">predict.fun</a> market link
+1. Enter the <a href="https://predict.fun?ref=73581">predict.fun</a> market link
 2. If the market is categorical — select a submarket
 3. Enter the amount in USDT (e.g., 10)
 4. Select side: ✅ YES or ❌ NO
@@ -134,19 +134,19 @@ HELP_TEXT_CN = """📖 <b>机器人使用说明</b>
 机器人自动维护限价订单，防止订单被执行。当当前价格接近订单价格时，机器人会自动将订单重新定位到安全距离。
 
 ⚠️ <b>重要：使用机器人之前</b>
-在机器人中注册之前，您必须通过 <a href="https://predict.fun/">predict.fun</a> 的网页界面<b>完成至少一笔交易</b>。这对于在您的钱包中设置approvals（权限）是必要的。没有这个，机器人将无法下订单。
+在机器人中注册之前，您必须通过 <a href="https://predict.fun?ref=73581">predict.fun</a> 的网页界面<b>完成至少一笔交易</b>。这对于在您的钱包中设置approvals（权限）是必要的。没有这个，机器人将无法下订单。
 
 <b>🔐 注册 (/start):</b>
 注册时，您需要来自同一钱包的三个参数：
 
 1. <b>钱包地址（存款地址）</b>
-   📍 在哪里找到：<a href="https://predict.fun/">predict.fun</a> 上的投资组合页面
-   🔗 链接：<a href="https://predict.fun/">https://predict.fun/</a>
+   📍 在哪里找到：<a href="https://predict.fun?ref=73581">predict.fun</a> 上的投资组合页面
+   🔗 链接：<a href="https://predict.fun?ref=73581">https://predict.fun</a>
    💡 这是您的Predict Account（智能钱包）地址
 
 2. <b>私钥（Privy钱包私钥）</b>
    📍 在哪里找到：账户设置页面
-   🔗 链接：<a href="https://predict.fun/account/settings">https://predict.fun/account/settings</a>
+   🔗 链接：<a href="https://predict.fun/account/settings?ref=73581">https://predict.fun/account/settings</a>
    💡 这是拥有您的Predict Account的Privy钱包的私钥
 
 3. <b>API密钥</b>
@@ -157,7 +157,7 @@ HELP_TEXT_CN = """📖 <b>机器人使用说明</b>
 ⚠️ <b>关键：</b> 所有三个参数必须属于<b>同一个钱包</b>。来自其他钱包的API密钥将无法下订单。
 
 <b>📊 下订单 (/make_market):</b>
-1. 输入 <a href="https://predict.fun/">predict.fun</a> 市场链接
+1. 输入 <a href="https://predict.fun?ref=73581">predict.fun</a> 市场链接
 2. 如果市场是分类市场 — 选择子市场
 3. 输入USDT金额（例如：10）
 4. 选择方向：✅ YES 或 ❌ NO

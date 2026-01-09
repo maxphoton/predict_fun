@@ -37,6 +37,7 @@ from sync_orders import async_sync_all_orders
 from logger_config import setup_root_logger
 from start_router import start_router
 from market_router import market_router
+from referral_router import referral_router
 from help_text import HELP_TEXT, HELP_TEXT_ENG, HELP_TEXT_CN
 
 # Загружаем переменные окружения
@@ -251,7 +252,7 @@ async def cmd_help(message: Message):
     builder.button(text="🇨🇳 中文", callback_data="help_lang_cn")
     builder.adjust(3)
     
-    await message.answer(HELP_TEXT_ENG, parse_mode="HTML", reply_markup=builder.as_markup())
+    await message.answer(HELP_TEXT_ENG, parse_mode="HTML", reply_markup=builder.as_markup(), disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith("help_lang_"))
@@ -277,7 +278,7 @@ async def process_help_lang(callback: CallbackQuery):
     builder.adjust(3)
     
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup(), link_preview_options=None)
     except Exception as e:
         logger.error(f"Ошибка при обновлении текста инструкции: {e}")
         await callback.answer("❌ Error updating message")
@@ -412,6 +413,7 @@ async def main():
     # Регистрируем роутеры
     dp.include_router(start_router)  # User registration router
     dp.include_router(market_router)  # Market order placement router
+    dp.include_router(referral_router)  # Referral code router
     dp.include_router(router)  # Main router (orders, get_db, etc.)
     
     # Запускаем фоновую задачу синхронизации ордеров

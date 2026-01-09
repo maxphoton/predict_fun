@@ -1212,7 +1212,11 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
 • Amount: {data['amount']} USDT
 • Offset: {offset_cents:.2f}¢
 • Reposition threshold: {reposition_threshold_cents:.2f}¢
-• Order Hash: <code>{order_hash}</code>"""
+• Order Hash: <code>{order_hash}</code>
+
+💡 <b>Useful commands:</b>
+• /orders - View and manage your orders
+• /make_market - Place a new order"""
         )
     else:
         error_text = f"""❌ <b>Failed to place order</b>

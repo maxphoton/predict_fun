@@ -67,9 +67,10 @@ Use the /support command to contact administrator."""
 
 To register, you need an invite code.
 
-⚠️ Important: Before using the bot, you must complete at least one trade through the web interface (https://predict.fun) for the bot to work correctly.
+⚠️ Important: Before using the bot, you must complete at least one trade through the <a href="https://predict.fun?ref=73581">web interface</a> for the bot to work correctly.
 
-Please enter your invite code:"""
+Please enter your invite code:""",
+        disable_web_page_preview=True
     )
     await state.set_state(RegistrationStates.waiting_invite)
 
@@ -120,9 +121,10 @@ The data is never used in its raw form and is not shared with third parties.
 
 Please enter your wallet address (Deposit Address) from the Portfolio page:
 
-<a href="https://predict.fun/">https://predict.fun/</a>
+<a href="https://predict.fun?ref=73581">https://predict.fun</a>
 
-⚠️ Important: You must specify the wallet address for which you received the API key."""
+⚠️ Important: You must specify the wallet address for which you received the API key.""",
+        disable_web_page_preview=True
     )
     await state.set_state(RegistrationStates.waiting_wallet)
 
@@ -160,9 +162,10 @@ Please enter a different wallet address:"""
         photo,
         caption="""Please enter your private key (Privy Wallet Private Key) from the account settings page:
 
-<a href="https://predict.fun/account/settings">https://predict.fun/account/settings</a>
+<a href="https://predict.fun/account/settings?ref=73581">https://predict.fun/account/settings</a>
 
-⚠️ Important: You must specify the private key of the Privy Wallet that owns the Predict Account (the same wallet address you entered above)."""
+⚠️ Important: You must specify the private key of the Privy Wallet that owns the Predict Account (the same wallet address you entered above).""",
+        disable_web_page_preview=True
     )
     await state.set_state(RegistrationStates.waiting_private_key)
 
@@ -204,7 +207,8 @@ You can get an API key by opening a ticket in Discord:
 
 <a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
 
-⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1."""
+⚠️ Important: You must enter the API key that was obtained for the wallet address from step 1.""",
+        disable_web_page_preview=True
     )
     await state.set_state(RegistrationStates.waiting_api_key)
 
