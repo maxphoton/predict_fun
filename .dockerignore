@@ -19,6 +19,7 @@ __pycache__/
 develop/
 *.md
 README.md
+deploy.sh
 
 # База данных (будет монтироваться как volume)
 bot/users.db

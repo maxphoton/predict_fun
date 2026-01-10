@@ -271,9 +271,7 @@ Please enter a different API key:"""
         await message.answer(
             f"""✅ Connection verified successfully!
 
-Your USDT balance: {balance_usdt:.6f} USDT
-
-Approvals will be set automatically when you place your first order."""
+Your USDT balance: {balance_usdt:.6f} USDT."""
         )
         
     except Exception as e:
