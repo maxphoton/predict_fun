@@ -778,6 +778,14 @@ async def send_order_updated_notification(
         side_emoji = "📈" if order_params.get("side") == Side.BUY else "📉"
         side_text = "BUY" if order_params.get("side") == Side.BUY else "SELL"
 
+        # Форматируем сумму
+        amount = order_params.get("amount", 0.0)
+        amount_display = (
+            f"{amount:.6f}".rstrip("0").rstrip(".")
+            if isinstance(amount, (int, float))
+            else str(amount)
+        )
+
         message = f"""✅ <b>Order Updated Successfully</b>
 
 {side_emoji} <b>{order_params.get("token_name", "N/A")} {side_text}</b>
@@ -788,7 +796,7 @@ async def send_order_updated_notification(
 
 💰 <b>Current Price:</b> {current_price_cents:.2f} cents
 🎯 <b>Target Price:</b> {target_price_cents:.2f} cents
-💵 <b>Amount:</b> {order_params["amount"]} USDT
+💵 <b>Amount:</b> {amount_display} USDT
 
 Order has been successfully moved to maintain the offset."""
 
@@ -813,13 +821,18 @@ async def send_order_placement_error_notification(
     """Отправляет уведомление пользователю об ошибке размещения ордера."""
     try:
         # Используем .get() для всех полей с значениями по умолчанию
-        current_price = order_params.get("current_price_at_creation", 0.0)
         target_price = order_params.get("target_price", 0.0)
-        current_price_cents = current_price * 100
         target_price_cents = target_price * 100
 
         side_emoji = "📈" if order_params.get("side") == Side.BUY else "📉"
         side_text = "BUY" if order_params.get("side") == Side.BUY else "SELL"
+
+        # Форматируем сумму
+        amount = order_params.get("amount", "N/A")
+        if isinstance(amount, (int, float)):
+            amount_display = f"{amount:.6f}".rstrip("0").rstrip(".")
+        else:
+            amount_display = str(amount)
 
         # Формируем сообщение об ошибке с информацией из API
         error_type = f"Error {errno}"
@@ -834,7 +847,7 @@ async def send_order_placement_error_notification(
 <code>{old_order_hash}</code>
 
 💰 <b>Target Price:</b> {target_price_cents:.2f} cents
-💵 <b>Amount:</b> {order_params.get("amount", "N/A")} USDT
+💵 <b>Amount:</b> {amount_display} USDT
 
 ⚠️ <b>{error_type}</b>
 {error_description}
@@ -876,11 +889,15 @@ async def send_order_filled_notification(
 
         amount_filled = api_order.get("amountFilled")
 
-        # Форматируем amount
+        # Форматируем amount (конвертируем из wei в USDT)
         try:
-            amount_float = float(amount_filled)
-            amount_display = f"{amount_float:.6f}".rstrip("0").rstrip(".")
-        except (ValueError, TypeError):
+            # amountFilled приходит в wei, нужно разделить на 1e18 для получения USDT
+            amount_wei = (
+                int(amount_filled) if isinstance(amount_filled, str) else amount_filled
+            )
+            amount_usdt = amount_wei / 1e18
+            amount_display = f"{amount_usdt:.6f}".rstrip("0").rstrip(".")
+        except (ValueError, TypeError, ZeroDivisionError):
             amount_display = str(amount_filled)
 
         market_url = f"https://predict.fun/market/{market_slug}"

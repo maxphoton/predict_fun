@@ -118,8 +118,11 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
             target_price_cents = target_price * 100
             price_str = f"{target_price_cents:.2f}".rstrip("0").rstrip(".")
 
+            # Форматируем сумму
+            amount_display = f"{amount:.6f}".rstrip("0").rstrip(".") if isinstance(amount, (int, float)) else str(amount)
+
             text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
-   {side_emoji} {side} {token_name} | {price_str}¢ | {amount} USDT
+   {side_emoji} {side} {token_name} | {price_str}¢ | {amount_display} USDT
    📊 Market title: {market_title[:50] if market_title else "N/A"}...
    ⚙️ Reposition threshold: {reposition_threshold_cents:.2f}¢
    📅 {date_str}
@@ -196,6 +199,7 @@ async def on_exit(callback: CallbackQuery, button: Button, manager: DialogManage
     await callback.message.answer(
         """Use the /make_market command to start a new farm.
 Use the /orders command to manage your orders.
+Use the /check_account command to check your balance and account statistics.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )
@@ -464,8 +468,11 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         target_price_cents = target_price * 100
         price_str = f"{target_price_cents:.2f}".rstrip("0").rstrip(".")
 
+        # Форматируем сумму
+        amount_display = f"{amount:.6f}".rstrip("0").rstrip(".") if isinstance(amount, (int, float)) else str(amount)
+
         text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
-   {side_emoji} {side} {token_name} | {price_str}¢ | {amount} USDT
+   {side_emoji} {side} {token_name} | {price_str}¢ | {amount_display} USDT
    📊 Market title: {market_title[:50] if market_title else "N/A"}...
    ⚙️ Reposition threshold: {reposition_threshold_cents:.2f}¢
    📅 {date_str}

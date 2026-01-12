@@ -14,7 +14,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from config import TICK_SIZE
 from database import get_user, save_order
@@ -247,6 +247,8 @@ def calculate_target_price(
     target = max(MIN_PRICE, min(MAX_PRICE, target))
     is_valid = MIN_PRICE <= target <= MAX_PRICE
     target = round(target, 3)
+    # Форматируем и преобразуем обратно в float для гарантии точности (избегаем проблем с float)
+    target = float(f"{target:.3f}")
 
     # Check that after rounding the price is still in valid range
     if target < MIN_PRICE:
@@ -920,7 +922,7 @@ Please enter a smaller amount:""",
 
 {bids_text}
 {asks_text}
-⚙️ Set the price offset (in ¢) relative to the best bid ({best_bid:.1f}¢). For example 0.1:
+⚙️ Set the price offset (in ¢) relative to the best bid ({best_bid:.1f}¢). For example 0.5:
 
 💡 You can select one of the quick options below or enter any other value manually.""",
             reply_markup=builder.as_markup(),
@@ -928,11 +930,11 @@ Please enter a smaller amount:""",
 
         # Create reply keyboard with quick offset options
         reply_builder = ReplyKeyboardBuilder()
-        reply_builder.button(text="0.1")
-        reply_builder.button(text="0.2")
         reply_builder.button(text="0.3")
-        reply_builder.button(text="0.4")
-        reply_builder.button(text="0.5")
+        reply_builder.button(text="0.6")
+        reply_builder.button(text="0.9")
+        reply_builder.button(text="1.2")
+        reply_builder.button(text="1.5")
         reply_builder.adjust(5)  # All buttons in one row
 
         await message.answer(
@@ -1141,6 +1143,28 @@ async def process_reposition_threshold(message: Message, state: FSMContext):
             )
             return
 
+        # Get offset from state to validate threshold
+        data = await state.get_data()
+        offset_ticks = data.get("offset_ticks")
+        tick_size = data.get("tick_size", TICK_SIZE)
+
+        if offset_ticks is not None:
+            offset_cents = offset_ticks * tick_size * 100
+
+            # Validation: threshold must be less than offset
+            # If threshold >= offset, the order will never be repositioned because
+            # the maximum change in target price equals the offset
+            if threshold_cents >= offset_cents:
+                builder = InlineKeyboardBuilder()
+                builder.button(text="✖️ Cancel", callback_data="cancel")
+                await message.answer(
+                    f"❌ Threshold ({threshold_cents:.2f}¢) must be less than offset ({offset_cents:.2f}¢).\n\n"
+                    f"If threshold is greater than or equal to offset, the order will never be repositioned.\n\n"
+                    f"Enter a threshold less than {offset_cents:.2f}¢:",
+                    reply_markup=builder.as_markup(),
+                )
+                return
+
         # Save threshold to state
         await state.update_data(reposition_threshold_cents=threshold_cents)
 
@@ -1297,7 +1321,8 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
         market_slug = data.get("slug")
         market_url = f"https://predict.fun/market/{market_slug}"
 
-        await callback.message.edit_text(
+        # Отправляем финальное сообщение с удалением reply-клавиатуры
+        await callback.message.answer(
             f"""✅ <b>Order successfully placed!</b>
 
 📋 <b>Final Information:</b>
@@ -1311,8 +1336,10 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
 
 💡 <b>Useful commands:</b>
 • /orders - View and manage your orders
-• /make_market - Place a new order""",
+• /make_market - Place a new order
+• /check_account - Check your balance and account statistics""",
             disable_web_page_preview=True,
+            reply_markup=ReplyKeyboardRemove(),
         )
     else:
         error_text = f"""❌ <b>Failed to place order</b>
@@ -1320,7 +1347,7 @@ async def process_confirm(callback: CallbackQuery, state: FSMContext):
 {error_message if error_message else "Please check your balance and order parameters."}
 
 Please try again using the /make_market command."""
-        await callback.message.edit_text(error_text)
+        await callback.message.answer(error_text, reply_markup=ReplyKeyboardRemove())
 
     await state.clear()
     await callback.answer()
@@ -1332,12 +1359,11 @@ async def process_cancel(callback: CallbackQuery, state: FSMContext):
     Universal handler for 'Cancel' button for all order placement states.
     Works in all MarketOrderStates.
     """
-    try:
-        # Try to edit message (if it's an inline button)
-        await callback.message.edit_text("❌ Order placement cancelled")
-    except Exception:
-        # If editing failed, send new message
-        await callback.message.answer("❌ Order placement cancelled")
+    # Send new message to remove keyboard
+    await callback.message.answer(
+        "❌ Order placement cancelled",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
     await state.clear()
     await callback.answer()
@@ -1346,6 +1372,7 @@ async def process_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         """Use the /make_market command to start a new farm.
 Use the /orders command to manage your orders.
+Use the /check_account command to check your balance and account statistics.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )

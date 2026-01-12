@@ -14,7 +14,7 @@ import logging
 from admin import admin_router
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -31,6 +31,8 @@ from help_text import HELP_TEXT, HELP_TEXT_CN, HELP_TEXT_ENG
 from logger_config import setup_root_logger
 from market_router import market_router
 from orders_dialog import OrdersSG, orders_dialog
+from predict_api import PredictAPIClient, get_chain_id, get_usdt_balance
+from predict_sdk import OrderBuilder, OrderBuilderOptions
 from referral_router import referral_router
 from spam_protection import AntiSpamMiddleware
 from start_router import start_router
@@ -149,6 +151,86 @@ async def process_help_lang(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.message(Command("check_account"))
+async def cmd_check_account(message: Message):
+    """Обработчик команды /check_account - проверка баланса и статистики аккаунта."""
+    logger.info(f"Команда /check_account от пользователя {message.from_user.id}")
+
+    # Проверяем, зарегистрирован ли пользователь
+    user = await get_user(message.from_user.id)
+    if not user:
+        await message.answer(
+            """❌ You are not registered. Use /start to register first."""
+        )
+        return
+
+    # Показываем индикатор печатания
+    await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+
+    try:
+        # Создаем API клиент и OrderBuilder
+        api_client = PredictAPIClient(
+            api_key=user["api_key"],
+            wallet_address=user["wallet_address"],
+            private_key=user["private_key"],
+        )
+
+        chain_id = get_chain_id()
+        order_builder = await asyncio.to_thread(
+            OrderBuilder.make,
+            chain_id,
+            user["private_key"],
+            OrderBuilderOptions(predict_account=user["wallet_address"]),
+        )
+
+        # Получаем баланс USDT
+        balance_wei = await get_usdt_balance(order_builder)
+        balance_usdt = balance_wei / 1e18
+
+        # Получаем открытые ордера
+        open_orders, _ = await api_client.get_my_orders(status="OPEN")
+        open_orders_count = len(open_orders)
+
+        # Получаем позиции
+        positions, _ = await api_client.get_positions()
+        positions_count = len(positions)
+
+        # Суммируем деньги в позициях (valueUsd)
+        total_positions_value = 0.0
+        for position in positions:
+            value_usd_str = position.get("valueUsd", "0")
+            try:
+                total_positions_value += float(value_usd_str)
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Не удалось преобразовать valueUsd в число: {value_usd_str}"
+                )
+
+        # Формируем ответ
+        response = f"""📊 <b>Account Information</b>
+
+💰 <b>USDT Balance:</b> {balance_usdt:.6f} USDT
+
+📋 <b>Open Orders:</b> {open_orders_count}
+
+📈 <b>Open Positions:</b> {positions_count}
+
+💵 <b>Total Value in Positions:</b> {total_positions_value:.6f} USDT"""
+
+        await message.answer(response, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(
+            f"Ошибка при проверке аккаунта для пользователя {message.from_user.id}: {e}",
+            exc_info=True,
+        )
+        await message.answer(
+            """❌ Error checking account information.
+
+Please try again later or contact support via /support."""
+        )
+
+
 @router.message(Command("support"))
 async def cmd_support(message: Message, state: FSMContext):
     """Обработчик команды /support - отправка сообщения в поддержку."""
@@ -236,6 +318,7 @@ async def handle_unknown_message(message: Message):
     await message.answer(
         """Use the /make_market command to start a new farm.
 Use the /orders command to manage your orders.
+Use the /check_account command to check your balance and account statistics.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )

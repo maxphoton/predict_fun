@@ -63,6 +63,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
+Use the /check_account command to check your balance and account statistics.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
         )
@@ -342,6 +343,7 @@ Please start registration again with /start using a valid invite code."""
 Your data has been encrypted and verified.
 
 Use the /make_market command to start a new farm.
+Use the /check_account command to check your balance and account statistics.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )

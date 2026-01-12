@@ -57,6 +57,8 @@ def calculate_new_target_price(
     MAX_PRICE = 0.999
     target = max(MIN_PRICE, min(MAX_PRICE, target))
     target = round(target, 3)
+    # Форматируем и преобразуем обратно в float для гарантии точности (избегаем проблем с float)
+    target = float(f"{target:.3f}")
 
     # Проверяем, что после округления цена все еще в допустимом диапазоне
     if target < MIN_PRICE:
@@ -500,7 +502,12 @@ async def place_single_order(
     """
     try:
         # Валидация цены
-        price_rounded = round(price, 3)  # API requires max 3 decimal places
+        # API requires max 3 decimal places
+        # Используем форматирование для гарантии точности (избегаем проблем с float)
+        price_rounded = round(price, 3)
+        # Форматируем и преобразуем обратно в float для гарантии точности
+        price_rounded = float(f"{price_rounded:.3f}")
+
         MIN_PRICE = 0.001
         MAX_PRICE = 0.999
 
