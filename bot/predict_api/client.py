@@ -6,11 +6,11 @@ REST API клиент для Predict.fun.
 """
 import asyncio
 import logging
-from typing import Optional, Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
-from .auth import refresh_jwt_token_if_needed, get_api_base_url
+from .auth import get_api_base_url, refresh_jwt_token_if_needed
 
 logger = logging.getLogger(__name__)
 

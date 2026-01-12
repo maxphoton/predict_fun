@@ -114,21 +114,23 @@ ARCHITECTURE:
   * Includes filled amount, market link, and order details
 """
 import asyncio
-import logging
 import time
 import traceback
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from database import get_user, get_user_orders, get_all_users, update_order_in_db, update_order_status
-from predict_api import PredictAPIClient
-from predict_api.sdk_operations import (
-    place_single_order,
-    calculate_new_target_price
-)
-from predict_api.auth import get_chain_id
-from predict_sdk import OrderBuilder, Side, OrderBuilderOptions
 from config import TICK_SIZE
+from database import (
+    get_all_users,
+    get_user,
+    get_user_orders,
+    update_order_in_db,
+    update_order_status,
+)
 from logger_config import setup_logger
+from predict_api import PredictAPIClient
+from predict_api.auth import get_chain_id
+from predict_api.sdk_operations import calculate_new_target_price, place_single_order
+from predict_sdk import OrderBuilder, OrderBuilderOptions, Side
 
 # Настройка логирования
 logger = setup_logger("sync_orders", "sync_orders.log")
@@ -485,7 +487,7 @@ async def cancel_orders_batch(api_client: PredictAPIClient, orders_to_cancel: Li
             noop_count = len(result.get('noop', []))
             logger.info(f"Успешно отменено {removed_count} ордеров через API (noop: {noop_count})")
         else:
-            logger.error(f"Ошибка при отмене ордеров через API")
+            logger.error("Ошибка при отмене ордеров через API")
         
         return result
         
@@ -574,7 +576,7 @@ async def place_orders_batch(api_client: PredictAPIClient, orders_params: List[D
                     current_price_for_db = current_price
                 else:
                     # Если не удалось получить текущую цену, используем цену из params
-                    logger.warning(f"Не удалось получить текущую цену для пересчета, используем цену из params")
+                    logger.warning("Не удалось получить текущую цену для пересчета, используем цену из params")
             
             # Получаем данные рынка (если нужно)
             market = None
@@ -972,7 +974,7 @@ async def async_sync_all_orders(bot):
                     
                     # Если не все ордера были обработаны (ни в removed, ни в noop), это ошибка
                     if user_total_processed == 0:
-                        logger.error(f"❌ Не удалось обработать ни одного ордера (ни удалить, ни найти в noop)")
+                        logger.error("❌ Не удалось обработать ни одного ордера (ни удалить, ни найти в noop)")
                         failed_cancellations = []
                         for i, order_api_id in enumerate(orders_to_cancel):
                                 order_params = orders_to_place[i]
