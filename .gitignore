@@ -8,3 +8,4 @@ develop/
 .git/credentials
 logs/
 *.log
+deploy.sh
