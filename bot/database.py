@@ -769,3 +769,95 @@ async def export_all_tables_to_zip() -> bytes:
 
     zip_buffer.seek(0)
     return zip_buffer.read()
+
+
+async def get_statistics() -> dict:
+    """
+    Получает общую статистику по базе данных.
+
+    Returns:
+        dict: Словарь со статистикой:
+            - users_total: общее количество пользователей
+            - users_with_orders: количество пользователей с ордерами
+            - orders_total: общее количество ордеров
+            - orders_by_status: словарь с количеством ордеров по статусам
+            - orders_amount_by_status: словарь с общей суммой ордеров по статусам
+            - orders_total_amount: общая сумма всех ордеров
+            - orders_avg_amount: средняя сумма ордера
+            - unique_markets: количество уникальных рынков
+            - unique_users_with_open_orders: количество пользователей с активными ордерами
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        # Общее количество пользователей
+        async with conn.execute("SELECT COUNT(*) FROM users") as cursor:
+            users_total = (await cursor.fetchone())[0]
+
+        # Количество пользователей с ордерами
+        async with conn.execute(
+            "SELECT COUNT(DISTINCT telegram_id) FROM orders"
+        ) as cursor:
+            users_with_orders = (await cursor.fetchone())[0]
+
+        # Общее количество ордеров
+        async with conn.execute("SELECT COUNT(*) FROM orders") as cursor:
+            orders_total = (await cursor.fetchone())[0]
+
+        # Количество ордеров по статусам
+        async with conn.execute(
+            """
+            SELECT status, COUNT(*) 
+            FROM orders 
+            GROUP BY status
+        """
+        ) as cursor:
+            rows = await cursor.fetchall()
+            orders_by_status = {row[0]: row[1] for row in rows}
+
+        # Общая сумма ордеров по статусам
+        async with conn.execute(
+            """
+            SELECT status, SUM(amount) 
+            FROM orders 
+            GROUP BY status
+        """
+        ) as cursor:
+            rows = await cursor.fetchall()
+            orders_amount_by_status = {row[0]: row[1] or 0.0 for row in rows}
+
+        # Общая сумма всех ордеров
+        async with conn.execute("SELECT SUM(amount) FROM orders") as cursor:
+            row = await cursor.fetchone()
+            orders_total_amount = row[0] if row[0] else 0.0
+
+        # Средняя сумма ордера
+        orders_avg_amount = (
+            orders_total_amount / orders_total if orders_total > 0 else 0.0
+        )
+
+        # Количество уникальных рынков
+        async with conn.execute(
+            "SELECT COUNT(DISTINCT market_id) FROM orders"
+        ) as cursor:
+            unique_markets = (await cursor.fetchone())[0]
+
+        # Количество пользователей с активными ордерами (OPEN)
+        async with conn.execute(
+            """
+            SELECT COUNT(DISTINCT telegram_id) 
+            FROM orders 
+            WHERE status = 'OPEN'
+        """
+        ) as cursor:
+            unique_users_with_open_orders = (await cursor.fetchone())[0]
+
+    return {
+        "users_total": users_total,
+        "users_with_orders": users_with_orders,
+        "orders_total": orders_total,
+        "orders_by_status": orders_by_status,
+        "orders_amount_by_status": orders_amount_by_status,
+        "orders_total_amount": orders_total_amount,
+        "orders_avg_amount": orders_avg_amount,
+        "unique_markets": unique_markets,
+        "unique_users_with_open_orders": unique_users_with_open_orders,
+    }
