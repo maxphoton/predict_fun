@@ -333,6 +333,7 @@ async def process_market_url(message: Message, state: FSMContext):
             api_key=user["api_key"],
             wallet_address=user["wallet_address"],
             private_key=user["private_key"],
+            proxy_str=user.get("proxy_str"),
         )
 
         # Создаем OrderBuilder для SDK операций

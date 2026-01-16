@@ -5,7 +5,7 @@
 
 import asyncio
 import logging
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import httpx
 from database import (
@@ -92,6 +92,33 @@ def parse_proxy(proxy_str: str) -> Optional[dict]:
         }
     except Exception as e:
         logger.error(f"Ошибка при парсинге прокси: {e}")
+        return None
+
+
+def parse_proxy_for_requests(proxy_str: Optional[str]) -> Optional[Dict[str, str]]:
+    """
+    Парсит прокси строку и преобразует в формат для requests.
+
+    Args:
+        proxy_str: Прокси в формате ip:port:login:password или None
+
+    Returns:
+        Словарь с ключами 'http' и 'https' для requests или None
+    """
+    if not proxy_str:
+        return None
+
+    parsed = parse_proxy(proxy_str)
+    if not parsed:
+        return None
+
+    try:
+        # Формат для requests: http://username:password@host:port
+        proxy_url = f"http://{parsed['username']}:{parsed['password']}@{parsed['host']}:{parsed['port']}"
+
+        return {"http": proxy_url, "https": proxy_url}
+    except Exception as e:
+        logger.warning(f"Ошибка преобразования прокси для requests: {e}")
         return None
 
 

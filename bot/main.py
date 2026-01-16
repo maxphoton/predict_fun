@@ -175,6 +175,7 @@ async def cmd_check_account(message: Message):
             api_key=user["api_key"],
             wallet_address=user["wallet_address"],
             private_key=user["private_key"],
+            proxy_str=user.get("proxy_str"),
         )
 
         chain_id = get_chain_id()

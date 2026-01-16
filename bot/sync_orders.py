@@ -1022,6 +1022,7 @@ async def async_sync_all_orders(bot):
                     api_key=user["api_key"],
                     wallet_address=user["wallet_address"],
                     private_key=user["private_key"],
+                    proxy_str=user.get("proxy_str"),
                 )
 
                 # Создаем OrderBuilder для SDK операций

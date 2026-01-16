@@ -338,11 +338,12 @@ Example: 192.168.1.1:8080:user:pass"""
     await message.answer("""🔍 Verifying connection to API...""")
 
     try:
-        # Создаем API клиент нового API
+        # Создаем API клиент нового API (используем прокси, который только что проверили)
         PredictAPIClient(
             api_key=api_key_clean,
             wallet_address=wallet_address,
             private_key=private_key,
+            proxy_str=proxy_input,
         )
 
         # Создаем OrderBuilder для SDK операций

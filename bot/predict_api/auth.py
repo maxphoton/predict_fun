@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 import requests
 from predict_sdk import ChainId, OrderBuilder, OrderBuilderOptions
@@ -89,7 +89,10 @@ def get_rpc_url() -> str:
 
 
 async def get_jwt_token_predict_account(
-    api_key: str, wallet_address: str, private_key: str
+    api_key: str,
+    wallet_address: str,
+    private_key: str,
+    proxies: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """
     Получить JWT токен для Predict account (смарт-кошелька).
@@ -98,6 +101,7 @@ async def get_jwt_token_predict_account(
         api_key: API ключ Predict.fun
         wallet_address: Адрес Predict account (deposit address)
         private_key: Приватный ключ Privy Wallet (можно экспортировать из настроек аккаунта)
+        proxies: Словарь с прокси для requests в формате {'http': '...', 'https': '...'} (опционально)
 
     Returns:
         JWT токен или None в случае ошибки
@@ -112,7 +116,10 @@ async def get_jwt_token_predict_account(
         # Шаг 1: Получаем сообщение для подписи
         api_base_url = get_api_base_url()
         message_response = requests.get(
-            f"{api_base_url}/auth/message", headers={"x-api-key": api_key}, timeout=30
+            f"{api_base_url}/auth/message",
+            headers={"x-api-key": api_key},
+            timeout=30,
+            proxies=proxies,
         )
 
         if message_response.status_code != 200:
@@ -146,6 +153,7 @@ async def get_jwt_token_predict_account(
             },
             json=body,
             timeout=30,
+            proxies=proxies,
         )
 
         if jwt_response.status_code != 200:
@@ -170,7 +178,10 @@ async def get_jwt_token_predict_account(
 
 
 async def get_jwt_token(
-    api_key: str, wallet_address: str, private_key: str
+    api_key: str,
+    wallet_address: str,
+    private_key: str,
+    proxies: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """
     Получить JWT токен для работы с API.
@@ -181,11 +192,14 @@ async def get_jwt_token(
         api_key: API ключ Predict.fun
         wallet_address: Deposit Address (адрес Predict Account)
         private_key: Приватный ключ Privy Wallet
+        proxies: Словарь с прокси для requests в формате {'http': '...', 'https': '...'} (опционально)
 
     Returns:
         JWT токен или None в случае ошибки
     """
-    return await get_jwt_token_predict_account(api_key, wallet_address, private_key)
+    return await get_jwt_token_predict_account(
+        api_key, wallet_address, private_key, proxies
+    )
 
 
 async def refresh_jwt_token_if_needed(
@@ -200,6 +214,7 @@ async def refresh_jwt_token_if_needed(
             - wallet_address: Deposit Address (адрес Predict Account)
             - private_key: Приватный ключ Privy Wallet
             - jwt_token: Текущий JWT токен (может быть None)
+            - proxies: Словарь с прокси для requests (опционально)
         force_refresh: Принудительно обновить токен даже если он есть
 
     Returns:
@@ -209,11 +224,22 @@ async def refresh_jwt_token_if_needed(
     if not force_refresh and session.get("jwt_token"):
         return True
 
+    # Получаем обязательные поля из сессии
+    api_key = session.get("api_key")
+    wallet_address = session.get("wallet_address")
+    private_key = session.get("private_key")
+
+    # Проверяем наличие обязательных полей
+    if not api_key or not wallet_address or not private_key:
+        logger.error("Отсутствуют обязательные поля в сессии для получения JWT токена")
+        return False
+
     # Получаем новый токен
     jwt_token = await get_jwt_token(
-        api_key=session["api_key"],
-        wallet_address=session["wallet_address"],
-        private_key=session["private_key"],
+        api_key=api_key,
+        wallet_address=wallet_address,
+        private_key=private_key,
+        proxies=session.get("proxies"),
     )
 
     if jwt_token:
