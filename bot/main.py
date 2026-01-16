@@ -25,7 +25,7 @@ from aiogram_dialog import DialogManager, StartMode, setup_dialogs
 
 # Импортируем локальные модули
 from config import settings
-from database import get_user, init_database
+from database import get_user, init_database, update_proxy_status
 from dotenv import load_dotenv
 from help_text import HELP_TEXT, HELP_TEXT_CN, HELP_TEXT_ENG
 from logger_config import setup_root_logger
@@ -33,6 +33,8 @@ from market_router import market_router
 from orders_dialog import OrdersSG, orders_dialog
 from predict_api import PredictAPIClient, get_chain_id, get_usdt_balance
 from predict_sdk import OrderBuilder, OrderBuilderOptions
+from proxy_checker import async_check_all_proxies, check_proxy_health, parse_proxy
+from proxy_router import proxy_router
 from referral_router import referral_router
 from spam_protection import AntiSpamMiddleware
 from start_router import start_router
@@ -217,6 +219,34 @@ async def cmd_check_account(message: Message):
 
 💵 <b>Total Value in Positions:</b> {total_positions_value:.6f} USDT"""
 
+        # Проверяем и обновляем статус прокси
+        proxy_str = user.get("proxy_str")
+        proxy_status = "unknown"
+        proxy_display = "Not configured"
+
+        if proxy_str:
+            proxy_status = await check_proxy_health(proxy_str)
+            await update_proxy_status(message.from_user.id, proxy_status)
+
+            # Парсим прокси для отображения IP:порт
+            parsed_proxy = parse_proxy(proxy_str)
+            if parsed_proxy:
+                proxy_display = f"{parsed_proxy['host']}:{parsed_proxy['port']}"
+            else:
+                proxy_display = "Invalid format"
+
+            status_emoji = (
+                "✅"
+                if proxy_status == "working"
+                else "❌"
+                if proxy_status == "failed"
+                else "⚠️"
+            )
+            response += f"""
+
+🔐 <b>Proxy:</b> {proxy_display}
+<b>Status:</b> {status_emoji} {proxy_status}"""
+
         await message.answer(response, parse_mode="HTML")
 
     except Exception as e:
@@ -347,6 +377,24 @@ async def background_sync_task():
         await asyncio.sleep(SYNC_INTERVAL)
 
 
+async def background_proxy_check_task():
+    """Фоновая задача для периодической проверки прокси."""
+    # Ждем 60 секунд после старта бота перед первой проверкой
+    await asyncio.sleep(60)
+
+    # Интервал проверки: 300 секунд (5 минут)
+    CHECK_INTERVAL = 300
+
+    while True:
+        try:
+            await async_check_all_proxies(bot)
+        except Exception as e:
+            logger.error(f"Error in background proxy check task: {e}")
+
+        # Ждем перед следующей проверкой
+        await asyncio.sleep(CHECK_INTERVAL)
+
+
 async def main():
     """Главная функция запуска бота."""
 
@@ -368,11 +416,16 @@ async def main():
     dp.include_router(market_router)  # Market order placement router
     dp.include_router(referral_router)  # Referral code router
     dp.include_router(admin_router)  # Admin commands router
+    dp.include_router(proxy_router)  # Proxy management router
     dp.include_router(router)  # Main router (orders, help, support, etc.)
 
     # Запускаем фоновую задачу синхронизации ордеров
     asyncio.create_task(background_sync_task())
     logger.info("Background sync task started")
+
+    # Запускаем фоновую задачу проверки прокси
+    asyncio.create_task(background_proxy_check_task())
+    logger.info("Background proxy check task started")
 
     # Отправляем сообщение админу при старте (если указан)
     if settings.admin_telegram_id and settings.admin_telegram_id != 0:

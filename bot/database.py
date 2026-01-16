@@ -39,6 +39,8 @@ async def init_database():
                 private_key_nonce BLOB NOT NULL,
                 api_key_cipher BLOB NOT NULL,
                 api_key_nonce BLOB NOT NULL,
+                proxy_str TEXT,
+                proxy_status TEXT DEFAULT 'unknown',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -113,6 +115,27 @@ async def init_database():
                     f"Ошибка при добавлении поля reposition_threshold_cents: {e}"
                 )
 
+        # Добавляем поля proxy_str и proxy_status если их нет (миграция)
+        try:
+            await conn.execute("""
+                ALTER TABLE users ADD COLUMN proxy_str TEXT
+            """)
+            await conn.commit()
+            logger.info("Добавлено поле proxy_str в таблицу users")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                logger.warning(f"Ошибка при добавлении поля proxy_str: {e}")
+
+        try:
+            await conn.execute("""
+                ALTER TABLE users ADD COLUMN proxy_status TEXT DEFAULT 'unknown'
+            """)
+            await conn.commit()
+            logger.info("Добавлено поле proxy_status в таблицу users")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                logger.warning(f"Ошибка при добавлении поля proxy_status: {e}")
+
         await conn.commit()
     logger.info("База данных инициализирована")
 
@@ -186,27 +209,53 @@ async def get_user(telegram_id: int) -> Optional[dict]:
     Returns:
         dict: Словарь с данными пользователя или None, если пользователь не найден
     """
+    # Явно указываем колонки в правильном порядке
+    columns = [
+        "telegram_id",
+        "username",
+        "wallet_address",
+        "wallet_nonce",
+        "private_key_cipher",
+        "private_key_nonce",
+        "api_key_cipher",
+        "api_key_nonce",
+        "proxy_str",
+        "proxy_status",
+        "created_at",
+    ]
+
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
-            "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+            f"""
+            SELECT {", ".join(columns)} FROM users 
+            WHERE telegram_id = ?
+        """,
+            (telegram_id,),
         ) as cursor:
             row = await cursor.fetchone()
 
     if not row:
         return None
 
+    # Создаем словарь из колонок и значений
+    user_dict = dict(zip(columns, row))
+
     # Расшифровываем данные
     try:
-        wallet_address = decrypt(row[2], row[3])
-        private_key = decrypt(row[4], row[5])
-        api_key = decrypt(row[6], row[7])
+        wallet_address = decrypt(user_dict["wallet_address"], user_dict["wallet_nonce"])
+        private_key = decrypt(
+            user_dict["private_key_cipher"], user_dict["private_key_nonce"]
+        )
+        api_key = decrypt(user_dict["api_key_cipher"], user_dict["api_key_nonce"])
 
         return {
-            "telegram_id": row[0],
-            "username": row[1],
+            "telegram_id": user_dict["telegram_id"],
+            "username": user_dict["username"],
             "wallet_address": wallet_address,
             "private_key": private_key,
             "api_key": api_key,
+            "proxy_str": user_dict.get("proxy_str"),
+            "proxy_status": user_dict.get("proxy_status", "unknown"),
         }
     except Exception as e:
         logger.error(f"Ошибка расшифровки данных пользователя {telegram_id}: {e}")
@@ -219,6 +268,8 @@ async def save_user(
     wallet_address: str,
     private_key: str,
     api_key: str,
+    proxy_str: Optional[str] = None,
+    proxy_status: str = "unknown",
 ):
     """
     Сохраняет данные пользователя в базу данных с шифрованием.
@@ -229,6 +280,8 @@ async def save_user(
         wallet_address: Адрес кошелька
         private_key: Приватный ключ
         api_key: API ключ
+        proxy_str: Прокси в формате ip:port:login:password (опционально)
+        proxy_status: Статус прокси ('working', 'failed', 'unknown')
     """
     async with aiosqlite.connect(DB_PATH) as conn:
         # Шифруем данные
@@ -241,8 +294,9 @@ async def save_user(
             """
             INSERT OR REPLACE INTO users 
             (telegram_id, username, wallet_address, wallet_nonce, 
-             private_key_cipher, private_key_nonce, api_key_cipher, api_key_nonce)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             private_key_cipher, private_key_nonce, api_key_cipher, api_key_nonce,
+             proxy_str, proxy_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 telegram_id,
@@ -253,6 +307,8 @@ async def save_user(
                 private_key_nonce,
                 api_key_cipher,
                 api_key_nonce,
+                proxy_str,
+                proxy_status,
             ),
         )
 
@@ -520,6 +576,55 @@ async def get_all_users():
         async with conn.execute("SELECT telegram_id FROM users") as cursor:
             rows = await cursor.fetchall()
     return [row[0] for row in rows]
+
+
+async def update_proxy_status(telegram_id: int, proxy_status: str):
+    """
+    Обновляет статус прокси для пользователя.
+
+    Args:
+        telegram_id: ID пользователя в Telegram
+        proxy_status: Новый статус прокси ('working', 'failed', 'unknown')
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            UPDATE users 
+            SET proxy_status = ?
+            WHERE telegram_id = ?
+        """,
+            (proxy_status, telegram_id),
+        )
+
+        await conn.commit()
+    logger.info(
+        f"Статус прокси для пользователя {telegram_id} обновлен на {proxy_status}"
+    )
+
+
+async def update_proxy(telegram_id: int, proxy_str: str, proxy_status: str):
+    """
+    Обновляет прокси и его статус для пользователя.
+
+    Args:
+        telegram_id: ID пользователя в Telegram
+        proxy_str: Прокси в формате ip:port:login:password
+        proxy_status: Статус прокси ('working', 'failed', 'unknown')
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            UPDATE users 
+            SET proxy_str = ?, proxy_status = ?
+            WHERE telegram_id = ?
+        """,
+            (proxy_str, proxy_status, telegram_id),
+        )
+
+        await conn.commit()
+    logger.info(
+        f"Прокси для пользователя {telegram_id} обновлен. Статус: {proxy_status}"
+    )
 
 
 async def delete_user(telegram_id: int) -> bool:
