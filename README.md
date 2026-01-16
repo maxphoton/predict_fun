@@ -20,8 +20,8 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
 - **Visual Guides**: Step-by-step registration with screenshots showing where to find wallet address, private key, and API key
 
 ### 🎫 Invite Management (Admin Only)
-- **Invite Generation**: Admin command `/get_invites` generates and displays 10 unused invite codes
-- **Automatic Creation**: System automatically creates new invites if fewer than 10 are available
+- **Invite Generation**: Admin command `/get_invites [count]` generates and displays unused invite codes (default: 10)
+- **Automatic Creation**: System automatically creates new invites if fewer than requested are available
 - **Statistics**: View total, used, and unused invite counts
 - **One-Time Use**: Each invite can only be used once
 - **Unique Codes**: 10-character alphanumeric codes with uniqueness validation
@@ -30,6 +30,8 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
 - **User Deletion**: Admin command `/delete_user` allows removing users from the database
 - **Complete Removal**: Deletes user, all their orders, and clears associated invites
 - **Re-registration Support**: Deleted users can register again with a new invite code
+- **Database Statistics**: Admin command `/stats` provides comprehensive database statistics including user counts, order statistics by status, and invite statistics
+- **Database Export**: Admin command `/get_db` exports all database tables to CSV files in a ZIP archive, plus log files
 
 ### 📊 Market Order Placement
 - **Interactive Flow**: Step-by-step process for placing limit orders
@@ -96,6 +98,14 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
 - **Interactive Language Selection**: Inline buttons for easy language switching
 - **Complete Guide**: Includes registration instructions, order placement workflow, order management, and support information
 
+### 💼 Account Management
+- **Account Information**: Command `/check_account` displays:
+  - USDT balance (from blockchain)
+  - Number of open orders
+  - Number of open positions
+  - Total value in positions (in USDT)
+- **Referral Code**: Command `/set_ref_code` allows setting a 5-character referral code (one-time setup)
+
 ### 🛡️ Security & Performance
 - **Anti-Spam Protection**: Built-in middleware to prevent message spam
 - **Async Architecture**: Fully asynchronous codebase using `aiosqlite` and `asyncio`
@@ -149,6 +159,32 @@ cd bot
 python main.py
 ```
 
+### Docker Deployment
+
+The project includes Docker support for easy deployment:
+
+1. Build and run with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+2. View logs:
+```bash
+docker-compose logs -f bot
+```
+
+3. Stop the bot:
+```bash
+docker-compose down
+```
+
+For detailed deployment instructions, see [DEPLOY.md](DEPLOY.md).
+
+**Important**: 
+- The `.env` file must be present in the project root
+- Database and logs are persisted via Docker volumes
+- Make sure to set up proper file permissions for the `logs/` directory
+
 ## Usage
 
 ### ⚠️ Prerequisites
@@ -186,7 +222,8 @@ The invite code is validated and used atomically at the end of registration only
 
 ### Invite Management (Admin Only)
 
-1. Use `/get_invites` to get 10 unused invite codes
+1. Use `/get_invites [count]` to get unused invite codes (default: 10)
+   - Example: `/get_invites 5` to get 5 invite codes
 2. The system automatically creates new invites if needed
 3. View statistics: total, used, and unused invite counts
 4. Share invite codes with users who need access
@@ -236,11 +273,27 @@ The invite code is validated and used atomically at the end of registration only
 4. Your message will be forwarded to the administrator with your user information (ID, username, name)
 5. You'll receive a confirmation when your message is sent
 
+### Checking Account Information
+
+1. Use `/check_account` to view your account statistics
+2. The bot displays:
+   - Current USDT balance (from blockchain)
+   - Number of open orders
+   - Number of open positions
+   - Total value locked in positions
+
+### Setting Referral Code
+
+1. Use `/set_ref_code` to set your referral code
+2. Enter a 5-character referral code
+3. ⚠️ **Important**: The code can only be set once and cannot be changed later
+4. The referral code must be exactly 5 characters long
+
 ## Project Structure
 
 ```
 bot/
-├── main.py                  # Main bot entry point, background tasks, admin commands
+├── main.py                  # Main bot entry point, background tasks, user commands
 ├── config.py                # Configuration and settings management
 ├── database.py              # Async database operations (aiosqlite)
 ├── aes.py                   # AES-GCM encryption utilities
@@ -252,18 +305,38 @@ bot/
 ├── orders_dialog.py         # Order management dialog (/orders command)
 ├── sync_orders.py           # Automatic order synchronization background task
 ├── invites.py               # Invite management functions
-├── predict_api/             # New API client implementation
+├── admin.py                 # Admin commands router (/get_db, /get_invites, /stats, /delete_user)
+├── referral_router.py       # Referral code management (/set_ref_code command)
+├── predict_api/             # Predict.fun API client implementation
+│   ├── __init__.py          # Module exports
 │   ├── client.py            # REST API client (PredictAPIClient)
 │   ├── sdk_operations.py    # SDK operations (balance, signing, cancellation)
-│   └── auth.py              # JWT authentication
+│   ├── auth.py              # JWT authentication
+│   └── README.md            # API client documentation
 └── users.db                 # SQLite database (created automatically)
+
+tests/                        # Test suite
+├── conftest.py              # Pytest configuration and fixtures
+├── test_predict_api_client.py  # Tests for API client
+├── test_sdk_operations.py   # Tests for SDK operations
+└── test_sync_orders.py     # Tests for order synchronization
+
+files/                        # Static files (images for registration guides)
+├── addr.png                 # Wallet address screenshot
+├── api.png                  # API key screenshot
+└── private.png              # Private key screenshot
 ```
 
 ## Architecture
 
 The bot uses a modular router-based architecture:
 
-- **Routers**: Separate routers for different features (`start_router`, `market_router`)
+- **Routers**: Separate routers for different features:
+  - `start_router` - User registration
+  - `market_router` - Order placement
+  - `referral_router` - Referral code management
+  - `admin_router` - Admin commands
+  - Main router in `main.py` - User commands (orders, help, support, check_account)
 - **Async Database**: All database operations use `aiosqlite` for non-blocking I/O
 - **Background Tasks**: Order synchronization runs as an independent async task
 - **Dialogs**: Complex multi-step interactions use `aiogram-dialog` for better UX
@@ -294,12 +367,15 @@ The bot supports the following environment variables:
 - `/start` - Register and set up your account (requires invite code)
 - `/make_market` - Start placing a limit order
 - `/orders` - View, search, and manage your orders
+- `/check_account` - View account information (balance, open orders, positions)
+- `/set_ref_code` - Set referral code (5 characters, one-time setup)
 - `/help` - View comprehensive bot instructions (available in English, Russian, and Chinese)
 - `/support` - Contact administrator with questions or issues (supports text and photos)
 
 ### Admin Commands
-- `/get_db` - Export user database (admin only)
-- `/get_invites` - Get 10 unused invite codes with statistics (admin only)
+- `/get_db` - Export user database and log files (admin only)
+- `/get_invites [count]` - Get unused invite codes with statistics (default: 10, admin only)
+- `/stats` - View comprehensive database statistics (admin only)
 - `/delete_user` - Delete a user from the database (admin only)
 
 ## Automatic Order Synchronization
@@ -343,6 +419,8 @@ The bot automatically synchronizes your orders every 60 seconds:
 - `python-dotenv==1.2.1` - Environment variable loading
 - `eth-account==0.13.7` - Ethereum account management
 - `requests==2.32.5` - HTTP client for REST API
+- `pytest==9.0.2` - Testing framework
+- `pytest-asyncio==1.3.0` - Async test support for pytest
 
 ## Technical Details
 
@@ -388,6 +466,46 @@ The bot automatically synchronizes your orders every 60 seconds:
   - Default status: `OPEN`
   - Migration function updates old statuses automatically
 - **invites**: Invite codes and usage tracking
+
+## Testing
+
+The project includes a test suite using pytest:
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_predict_api_client.py
+
+# Run with verbose output
+pytest -v
+```
+
+Test files are located in the `tests/` directory:
+- `test_predict_api_client.py` - Tests for REST API client
+- `test_sdk_operations.py` - Tests for SDK operations
+- `test_sync_orders.py` - Tests for order synchronization
+
+## Deployment
+
+### Docker Deployment
+
+See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions using the provided `deploy.sh` script.
+
+The deployment script supports:
+- Full deployment (`./deploy.sh deploy`)
+- View logs (`./deploy.sh logs`)
+- Check status (`./deploy.sh status`)
+- Stop container (`./deploy.sh stop`)
+- Restart container (`./deploy.sh restart`)
+
+### Manual Deployment
+
+1. Ensure all dependencies are installed
+2. Set up `.env` file with required variables
+3. Create `logs/` directory for log files
+4. Run the bot: `cd bot && python main.py`
 
 ## Disclaimer
 

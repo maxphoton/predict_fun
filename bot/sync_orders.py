@@ -28,7 +28,9 @@ PROCESS OVERVIEW:
    For each active order (after status check):
    a. Gets current market price from orderbook:
       - For BUY orders: uses best_bid (highest bid price)
-      - For SELL orders: uses best_ask (lowest ask price)
+      - For SELL orders: uses best_bid (highest bid price)
+      - When price goes UP: best_bid increases → SELL order gets closer to execution
+      - When price goes DOWN: best_bid decreases → BUY order gets closer to execution
    b. Calculates new target price using saved offset_ticks from database:
       - BUY: new_target_price = current_price - (offset_ticks * TICK_SIZE)
       - SELL: new_target_price = current_price + (offset_ticks * TICK_SIZE)
@@ -150,10 +152,14 @@ async def get_current_market_price(
     """
     Получает текущую цену рынка для рынка.
 
+    Для BUY и SELL используется best_bid (самый высокий бид):
+    - BUY: когда цена ВНИЗ (best_bid уменьшается), ордер ближе к исполнению
+    - SELL: когда цена ВВЕРХ (best_bid увеличивается), ордер ближе к исполнению
+
     Args:
         api_client: Клиент Predict.fun API
         market_id: ID рынка
-        side: BUY или SELL - определяет, какую цену брать (best_bid для BUY, best_ask для SELL)
+        side: BUY или SELL - для обоих используется best_bid
         token_name: "YES" или "NO" - для определения правильной цены
 
     Returns:
@@ -168,46 +174,27 @@ async def get_current_market_price(
 
         # Новый API возвращает массивы массивов: [[price, size], ...]
         bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
 
-        if side == "BUY":
-            # Для BUY берем best_bid (самый высокий бид)
-            if bids and len(bids) > 0:
-                # bids - это массив массивов [[price, size], ...]
-                # Берем первый элемент (самый высокий бид) и извлекаем цену
-                bid_prices = []
-                for bid in bids:
-                    if isinstance(bid, list) and len(bid) >= 1:
-                        try:
-                            price = float(bid[0])  # Первый элемент - цена
-                            bid_prices.append(price)
-                        except (ValueError, TypeError):
-                            continue
-                if bid_prices:
-                    best_bid = max(bid_prices)
-                    # Если это NO токен, цена NO = 1 - price_yes
-                    if token_name == "NO":
-                        return 1.0 - best_bid
-                    return best_bid
-        else:  # SELL
-            # Для SELL берем best_ask (самый низкий аск)
-            if asks and len(asks) > 0:
-                # asks - это массив массивов [[price, size], ...]
-                # Берем первый элемент (самый низкий аск) и извлекаем цену
-                ask_prices = []
-                for ask in asks:
-                    if isinstance(ask, list) and len(ask) >= 1:
-                        try:
-                            price = float(ask[0])  # Первый элемент - цена
-                            ask_prices.append(price)
-                        except (ValueError, TypeError):
-                            continue
-                if ask_prices:
-                    best_ask = min(ask_prices)
-                    # Если это NO токен, цена NO = 1 - price_yes
-                    if token_name == "NO":
-                        return 1.0 - best_ask
-                    return best_ask
+        # Для BUY и SELL используем best_bid (самый высокий бид)
+        # BUY: когда цена ВНИЗ (best_bid уменьшается), ордер ближе к исполнению
+        # SELL: когда цена ВВЕРХ (best_bid увеличивается), ордер ближе к исполнению
+        if bids and len(bids) > 0:
+            # bids - это массив массивов [[price, size], ...]
+            # Берем первый элемент (самый высокий бид) и извлекаем цену
+            bid_prices = []
+            for bid in bids:
+                if isinstance(bid, list) and len(bid) >= 1:
+                    try:
+                        price = float(bid[0])  # Первый элемент - цена
+                        bid_prices.append(price)
+                    except (ValueError, TypeError):
+                        continue
+            if bid_prices:
+                best_bid = max(bid_prices)
+                # Если это NO токен, цена NO = 1 - price_yes
+                if token_name == "NO":
+                    return 1.0 - best_bid
+                return best_bid
 
         logger.warning(
             f"Не удалось определить текущую цену для рынка {market_id}, side={side}, token={token_name}"
