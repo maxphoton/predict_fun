@@ -5,11 +5,16 @@ Handles proxy update process with format validation and connection check.
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from database import get_user, update_proxy
 from proxy_checker import check_proxy_health, validate_proxy_format
 
@@ -33,6 +38,15 @@ class ProxyStates(StatesGroup):
 proxy_router = Router()
 
 
+def get_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Creates inline keyboard with cancel button."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✖️ Отменить", callback_data="cancel_proxy")]
+        ]
+    )
+
+
 @proxy_router.message(Command("set_proxy"))
 async def cmd_set_proxy(message: Message, state: FSMContext):
     """Handler for /set_proxy command - start of proxy update process."""
@@ -42,17 +56,18 @@ async def cmd_set_proxy(message: Message, state: FSMContext):
     user = await get_user(message.from_user.id)
     if not user:
         await message.answer(
-            """❌ You are not registered. Use /start to register first."""
+            """✖️ You are not registered. Use /start to register first."""
         )
         return
 
-    # Запрашиваем прокси
+    # Запрашиваем прокси с кнопкой отмены
     await message.answer(
         """🔐 Please enter your proxy server for secure connection to Predict.
 
 Proxy format: ip:port:login:password
 
-Example: 192.168.1.1:8080:user:pass"""
+Example: 192.168.1.1:8080:user:pass""",
+        reply_markup=get_cancel_keyboard(),
     )
     await state.set_state(ProxyStates.waiting_proxy)
 
@@ -63,26 +78,22 @@ async def process_proxy(message: Message, state: FSMContext):
     telegram_id = message.from_user.id
 
     # Валидируем формат прокси
-    if not message.text:
-        await message.answer(
-            """❌ Please enter your proxy server.
-
-Proxy format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-        )
-        return
-
-    proxy_input = message.text.strip()
+    proxy_input = message.text.strip() if message.text else ""
     is_valid, error_message = validate_proxy_format(proxy_input)
 
     if not is_valid:
+        error_text = (
+            f"✖️ Invalid proxy format: {error_message}"
+            if proxy_input
+            else "✖️ Please enter your proxy server."
+        )
         await message.answer(
-            f"""❌ Invalid proxy format: {error_message}
+            f"""{error_text}
 
-Please enter proxy in format: ip:port:login:password
+Proxy format: ip:port:login:password
 
-Example: 192.168.1.1:8080:user:pass"""
+Example: 192.168.1.1:8080:user:pass""",
+            reply_markup=get_cancel_keyboard(),
         )
         return
 
@@ -93,25 +104,27 @@ Example: 192.168.1.1:8080:user:pass"""
         proxy_status = await check_proxy_health(proxy_input)
         if proxy_status != "working":
             await message.answer(
-                """❌ Proxy check failed. The proxy is not working.
+                """✖️ Proxy check failed. The proxy is not working.
 
 Please enter a valid proxy server.
 
 Proxy format: ip:port:login:password
 
-Example: 192.168.1.1:8080:user:pass"""
+Example: 192.168.1.1:8080:user:pass""",
+                reply_markup=get_cancel_keyboard(),
             )
             return
     except Exception as e:
         logger.error(f"Ошибка проверки прокси для пользователя {telegram_id}: {e}")
         await message.answer(
-            """❌ Error checking proxy.
+            """✖️ Error checking proxy.
 
 Please enter a valid proxy server.
 
 Proxy format: ip:port:login:password
 
-Example: 192.168.1.1:8080:user:pass"""
+Example: 192.168.1.1:8080:user:pass""",
+            reply_markup=get_cancel_keyboard(),
         )
         return
 
@@ -138,8 +151,22 @@ Use the /check_account command to verify your proxy status."""
     except Exception as e:
         logger.error(f"Ошибка обновления прокси для пользователя {telegram_id}: {e}")
         await message.answer(
-            """❌ Error updating proxy.
+            """✖️ Error updating proxy.
 
 Please try again later or contact support via /support."""
         )
         await state.clear()
+
+
+@proxy_router.callback_query(F.data == "cancel_proxy")
+async def cancel_proxy_handler(callback: CallbackQuery, state: FSMContext):
+    """Handler for cancel button - exits proxy update process."""
+    current_state = await state.get_state()
+    if current_state is None:
+        await callback.answer("Нет активного процесса для отмены.")
+        return
+
+    await state.clear()
+    await callback.message.edit_text("✖️ Процесс настройки прокси отменен.")
+    await callback.answer("Отменено")
+    logger.info(f"Пользователь {callback.from_user.id} отменил настройку прокси")

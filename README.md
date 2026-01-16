@@ -104,7 +104,21 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
   - Number of open orders
   - Number of open positions
   - Total value in positions (in USDT)
+  - Proxy status (if configured)
 - **Referral Code**: Command `/set_ref_code` allows setting a 5-character referral code (one-time setup)
+
+### 🔐 Proxy Management
+- **Proxy Configuration**: Proxy is required during registration and can be updated later via `/set_proxy` command
+- **Format Validation**: Proxy format is validated (ip:port:login:password)
+- **Health Checking**: Proxy connection is tested before saving using HTTP requests
+- **Status Tracking**: Proxy status is tracked (working/failed/unknown) in the database
+- **Background Monitoring**: Automatic proxy health checks every 5 minutes for all users
+- **Status Notifications**: Users receive notifications when proxy status changes:
+  - ⚠️ Notification when proxy stops working (working → failed)
+  - ✅ Notification when proxy is restored (failed → working)
+- **API Integration**: All API requests use configured proxy if available
+- **Account Display**: Proxy status is shown in `/check_account` command with visual indicators
+- **Automatic Updates**: Proxy status is automatically updated during health checks
 
 ### 🛡️ Security & Performance
 - **Anti-Spam Protection**: Built-in middleware to prevent message spam
@@ -131,7 +145,7 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd trade_bot
+cd predict_fun
 ```
 
 2. Install dependencies:
@@ -210,8 +224,13 @@ For detailed deployment instructions, see [DEPLOY.md](DEPLOY.md).
    - 📍 **Where to find**: Open a ticket in the [predict.fun Discord server](https://discord.gg/predictdotfun)
    - 💡 Request an API key for your wallet through Discord
    - ⚠️ **Important**: Must be the API key obtained for the wallet from step 3
+6. Enter your **Proxy Server**
+   - Format: `ip:port:login:password`
+   - Example: `192.168.1.1:8080:user:pass`
+   - Proxy connection is tested before saving
+   - Can be updated later using `/set_proxy` command
 
-⚠️ **Critical**: All three parameters must belong to the **same wallet**. An API key from another wallet will not allow placing orders.
+⚠️ **Critical**: All three parameters (wallet address, private key, API key) must belong to the **same wallet**. An API key from another wallet will not allow placing orders.
 
 All data is encrypted and stored securely. The bot validates:
 - Uniqueness of wallet address, private key, and API key
@@ -289,6 +308,17 @@ The invite code is validated and used atomically at the end of registration only
 3. ⚠️ **Important**: The code can only be set once and cannot be changed later
 4. The referral code must be exactly 5 characters long
 
+### Proxy Management
+
+1. Use `/set_proxy` to configure or update your proxy server
+2. Enter proxy in format: `ip:port:login:password`
+   - Example: `192.168.1.1:8080:user:pass`
+3. The bot validates the format and tests the connection
+4. Proxy status is automatically monitored every 5 minutes
+5. You'll receive notifications if proxy status changes (working ↔ failed)
+6. View proxy status in `/check_account` command
+7. ⚠️ **Note**: Proxy is required for secure connections to the Predict.fun API
+
 ## Project Structure
 
 ```
@@ -307,6 +337,8 @@ bot/
 ├── invites.py               # Invite management functions
 ├── admin.py                 # Admin commands router (/get_db, /get_invites, /stats, /delete_user)
 ├── referral_router.py       # Referral code management (/set_ref_code command)
+├── proxy_router.py          # Proxy management router (/set_proxy command)
+├── proxy_checker.py         # Proxy validation and health checking
 ├── predict_api/             # Predict.fun API client implementation
 │   ├── __init__.py          # Module exports
 │   ├── client.py            # REST API client (PredictAPIClient)
@@ -335,13 +367,17 @@ The bot uses a modular router-based architecture:
   - `start_router` - User registration
   - `market_router` - Order placement
   - `referral_router` - Referral code management
+  - `proxy_router` - Proxy management
   - `admin_router` - Admin commands
   - Main router in `main.py` - User commands (orders, help, support, check_account)
 - **Async Database**: All database operations use `aiosqlite` for non-blocking I/O
-- **Background Tasks**: Order synchronization runs as an independent async task
+- **Background Tasks**: 
+  - Order synchronization runs every 60 seconds
+  - Proxy health checking runs every 5 minutes
 - **Dialogs**: Complex multi-step interactions use `aiogram-dialog` for better UX
 - **Middleware**: Global anti-spam protection for all messages and callbacks
 - **API Client**: Uses `PredictAPIClient` (REST API) and `predict_sdk.OrderBuilder` (SDK) for all API operations
+- **Proxy Support**: Optional proxy configuration for secure API connections
 
 ## Security
 
@@ -367,8 +403,9 @@ The bot supports the following environment variables:
 - `/start` - Register and set up your account (requires invite code)
 - `/make_market` - Start placing a limit order
 - `/orders` - View, search, and manage your orders
-- `/check_account` - View account information (balance, open orders, positions)
+- `/check_account` - View account information (balance, open orders, positions, proxy status)
 - `/set_ref_code` - Set referral code (5 characters, one-time setup)
+- `/set_proxy` - Update proxy server configuration (format: ip:port:login:password)
 - `/help` - View comprehensive bot instructions (available in English, Russian, and Chinese)
 - `/support` - Contact administrator with questions or issues (supports text and photos)
 
@@ -419,6 +456,7 @@ The bot automatically synchronizes your orders every 60 seconds:
 - `python-dotenv==1.2.1` - Environment variable loading
 - `eth-account==0.13.7` - Ethereum account management
 - `requests==2.32.5` - HTTP client for REST API
+- `httpx==0.28.1` - Async HTTP client for proxy checking
 - `pytest==9.0.2` - Testing framework
 - `pytest-asyncio==1.3.0` - Async test support for pytest
 
@@ -461,6 +499,8 @@ The bot automatically synchronizes your orders every 60 seconds:
   - `telegram_id` (PRIMARY KEY): User's Telegram ID
   - All sensitive data encrypted with AES-GCM
   - Unique constraints on wallet address, private key, and API key
+  - `proxy_str`: Optional proxy configuration (ip:port:login:password)
+  - `proxy_status`: Proxy health status (working/failed/unknown)
 - **orders**: Order information (order_hash, order_api_id, market_slug, prices, amounts, status, etc.)
   - Status values: `OPEN`, `FILLED`, `CANCELLED`, `EXPIRED`, `INVALIDATED` (aligned with API terminology)
   - Default status: `OPEN`

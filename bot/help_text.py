@@ -4,6 +4,9 @@
 
 HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 
+🔗 <b>Регистрация на платформе:</b>
+Для начала работы зарегистрируйтесь на <a href="https://predict.fun?ref=73581">predict.fun</a>.
+
 <b>🎯 Цель бота:</b>
 Бот автоматически поддерживает лимитные ордера, не давая им исполниться. Когда текущая цена приближается к цене ордера, бот автоматически переставляет ордер на безопасное расстояние.
 
@@ -28,7 +31,13 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
    🔗 Ссылка: <a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
    💡 Запросите API ключ для вашего кошелька через Discord
 
-⚠️ <b>Критически важно:</b> Все три параметра должны относиться к <b>одному и тому же кошельку</b>. API ключ от другого кошелька не позволит размещать ордера.
+4. <b>Прокси-сервер</b>
+   📍 Формат: ip:port:login:password
+   💡 Пример: 192.168.1.1:8080:user:pass
+   ⚠️ Прокси необходим для безопасного подключения к API predict.fun
+   🔧 Можно обновить позже командой /set_proxy
+
+⚠️ <b>Критически важно:</b> Все три параметра (адрес кошелька, приватный ключ, API ключ) должны относиться к <b>одному и тому же кошельку</b>. API ключ от другого кошелька не позволит размещать ордера.
 
 <b>📊 Размещение ордера (/make_market):</b>
 1. Введите ссылку на маркет <a href="https://predict.fun?ref=73581">predict.fun</a>
@@ -62,10 +71,28 @@ HELP_TEXT = """📖 <b>Инструкция по работе с ботом</b>
 
 📬 При исполнении ордера бот автоматически отправит вам уведомление с деталями исполнения.
 
+<b>🔐 Управление прокси (/set_proxy):</b>
+Команда позволяет настроить или обновить прокси-сервер для безопасного подключения к API:
+• Формат: ip:port:login:password
+• Прокси проверяется перед сохранением
+• Статус прокси отображается в команде /check_account
+• Автоматическая проверка прокси каждые 5 минут
+
+<b>💼 Информация об аккаунте (/check_account):</b>
+Команда показывает:
+• Баланс USDT (из блокчейна)
+• Количество открытых ордеров
+• Количество открытых позиций
+• Общую стоимость позиций
+• Статус прокси (если настроен)
+
 <b>💬 Поддержка:</b>
 По всем вопросам обращайтесь через команду /support"""
 
 HELP_TEXT_ENG = """📖 <b>Bot Usage Instructions</b>
+
+🔗 <b>Platform Registration:</b>
+To get started, register on <a href="https://predict.fun?ref=73581">predict.fun</a>.
 
 <b>🎯 Bot Purpose:</b>
 The bot automatically maintains limit orders, preventing them from being executed. When the current price approaches the order price, the bot automatically repositions the order to a safe distance.
@@ -91,7 +118,13 @@ When registering, you will need three parameters from the same wallet:
    🔗 Link: <a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
    💡 Request an API key for your wallet through Discord
 
-⚠️ <b>Critical:</b> All three parameters must belong to the <b>same wallet</b>. An API key from another wallet will not allow placing orders.
+4. <b>Proxy Server</b>
+   📍 Format: ip:port:login:password
+   💡 Example: 192.168.1.1:8080:user:pass
+   ⚠️ Proxy is required for secure connection to predict.fun API
+   🔧 Can be updated later using /set_proxy command
+
+⚠️ <b>Critical:</b> All three parameters (wallet address, private key, API key) must belong to the <b>same wallet</b>. An API key from another wallet will not allow placing orders.
 
 <b>📊 Placing an Order (/make_market):</b>
 1. Enter the <a href="https://predict.fun?ref=73581">predict.fun</a> market link
@@ -125,10 +158,28 @@ The command allows you to:
 
 📬 When an order is executed, the bot will automatically send you a notification with execution details.
 
+<b>🔐 Proxy Management (/set_proxy):</b>
+The command allows you to configure or update the proxy server for secure API connection:
+• Format: ip:port:login:password
+• Proxy is tested before saving
+• Proxy status is shown in /check_account command
+• Automatic proxy health checks every 5 minutes
+
+<b>💼 Account Information (/check_account):</b>
+The command displays:
+• USDT balance (from blockchain)
+• Number of open orders
+• Number of open positions
+• Total value in positions
+• Proxy status (if configured)
+
 <b>💬 Support:</b>
 For all questions, contact us via the /support command"""
 
 HELP_TEXT_CN = """📖 <b>机器人使用说明</b>
+
+🔗 <b>平台注册:</b>
+要开始使用，请通过推荐链接在 <a href="https://predict.fun?ref=73581">predict.fun</a>。
 
 <b>🎯 机器人目的:</b>
 机器人自动维护限价订单，防止订单被执行。当当前价格接近订单价格时，机器人会自动将订单重新定位到安全距离。
@@ -154,7 +205,13 @@ HELP_TEXT_CN = """📖 <b>机器人使用说明</b>
    🔗 链接：<a href="https://discord.gg/predictdotfun">https://discord.gg/predictdotfun</a>
    💡 通过Discord为您的钱包请求API密钥
 
-⚠️ <b>关键：</b> 所有三个参数必须属于<b>同一个钱包</b>。来自其他钱包的API密钥将无法下订单。
+4. <b>代理服务器</b>
+   📍 格式：ip:port:login:password
+   💡 示例：192.168.1.1:8080:user:pass
+   ⚠️ 代理是安全连接到predict.fun API所必需的
+   🔧 可以使用 /set_proxy 命令稍后更新
+
+⚠️ <b>关键：</b> 所有三个参数（钱包地址、私钥、API密钥）必须属于<b>同一个钱包</b>。来自其他钱包的API密钥将无法下订单。
 
 <b>📊 下订单 (/make_market):</b>
 1. 输入 <a href="https://predict.fun?ref=73581">predict.fun</a> 市场链接
@@ -187,6 +244,21 @@ HELP_TEXT_CN = """📖 <b>机器人使用说明</b>
 ⚠️ <b>重要:</b> 您只能管理通过机器人创建的订单。在平台上手动放置的订单不会显示。
 
 📬 当订单被执行时，机器人会自动向您发送包含执行详情的通知。
+
+<b>🔐 代理管理 (/set_proxy):</b>
+该命令允许您配置或更新代理服务器以安全连接API：
+• 格式：ip:port:login:password
+• 代理在保存前会被测试
+• 代理状态在 /check_account 命令中显示
+• 每5分钟自动检查代理健康状态
+
+<b>💼 账户信息 (/check_account):</b>
+该命令显示：
+• USDT余额（来自区块链）
+• 开放订单数量
+• 开放持仓数量
+• 持仓总价值
+• 代理状态（如果已配置）
 
 <b>💬 支持:</b>
 如有任何问题，请通过 /support 命令联系我们"""

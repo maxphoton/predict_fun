@@ -119,7 +119,11 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
             price_str = f"{target_price_cents:.2f}".rstrip("0").rstrip(".")
 
             # Форматируем сумму
-            amount_display = f"{amount:.6f}".rstrip("0").rstrip(".") if isinstance(amount, (int, float)) else str(amount)
+            amount_display = (
+                f"{amount:.6f}".rstrip("0").rstrip(".")
+                if isinstance(amount, (int, float))
+                else str(amount)
+            )
 
             text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
    {side_emoji} {side} {token_name} | {price_str}¢ | {amount_display} USDT
@@ -197,9 +201,12 @@ To exit cancel mode, press the Cancel Order button again."""
 async def on_exit(callback: CallbackQuery, button: Button, manager: DialogManager):
     """Обработчик кнопки Exit - отправляет сообщение и закрывает диалог."""
     await callback.message.answer(
-        """Use the /make_market command to start a new farm.
+        """🔗 Platform: <a href="https://predict.fun?ref=73581">predict.fun</a>
+
+Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
+Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )
@@ -470,7 +477,11 @@ Page {current_page + 1} of {(total + items_per_page - 1) // items_per_page if to
         price_str = f"{target_price_cents:.2f}".rstrip("0").rstrip(".")
 
         # Форматируем сумму
-        amount_display = f"{amount:.6f}".rstrip("0").rstrip(".") if isinstance(amount, (int, float)) else str(amount)
+        amount_display = (
+            f"{amount:.6f}".rstrip("0").rstrip(".")
+            if isinstance(amount, (int, float))
+            else str(amount)
+        )
 
         text += f"""<b>{i}.</b> {status_emoji} {status.upper()} <code>{order_hash}</code>
    {side_emoji} {side} {token_name} | {price_str}¢ | {amount_display} USDT

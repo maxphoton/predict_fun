@@ -63,9 +63,12 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(
             """✅ You are already registered!
 
+🔗 Platform: <a href="https://predict.fun?ref=73581">predict.fun</a>
+
 Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
+Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
         )
@@ -409,8 +412,12 @@ Please start registration again with /start using a valid invite code."""
 
 Your data has been encrypted and verified.
 
-Use the /make_market command to start a new farm.
+🔗 Platform: <a href="https://predict.fun?ref=73581">predict.fun</a>
+
+Use the /make_market command to place an order.
+Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
+Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
         )

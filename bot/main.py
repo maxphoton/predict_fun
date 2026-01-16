@@ -347,9 +347,13 @@ async def handle_unknown_message(message: Message):
     Отвечает стандартным сообщением с инструкцией.
     """
     await message.answer(
-        """Use the /make_market command to start a new farm.
+        """🔗 Register on <a href="https://predict.fun?ref=73581">predict.fun</a> to get started!
+
+Use the /start command to register in the bot.
+Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
+Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )

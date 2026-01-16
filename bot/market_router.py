@@ -1371,9 +1371,12 @@ async def process_cancel(callback: CallbackQuery, state: FSMContext):
 
     # Send instruction message
     await callback.message.answer(
-        """Use the /make_market command to start a new farm.
+        """🔗 Platform: <a href="https://predict.fun?ref=73581">predict.fun</a>
+
+Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
+Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )
