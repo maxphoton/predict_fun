@@ -143,39 +143,44 @@ async def check_proxy_health(proxy_str: str, timeout: float = 10.0) -> str:
     username = parsed["username"]
     password = parsed["password"]
 
-    try:
-        # Делаем тестовый HTTP запрос через прокси
-        # Используем публичный API для проверки (например, httpbin.org)
-        # Для Basic Auth в прокси нужно использовать формат http://username:password@host:port
-        proxy_url_with_auth = f"http://{username}:{password}@{host}:{port}"
+    delays = [0, 3, 5, 10]
+    proxy_url_with_auth = f"http://{username}:{password}@{host}:{port}"
 
-        async with httpx.AsyncClient(
-            proxy=proxy_url_with_auth,
-            timeout=timeout,
-        ) as client:
-            response = await client.get(
-                "http://httpbin.org/ip",
+    for attempt, delay in enumerate(delays):
+        if attempt > 0:
+            await asyncio.sleep(delay)
+
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy_url_with_auth,
                 timeout=timeout,
-            )
+            ) as client:
+                response = await client.get(
+                    "http://httpbin.org/ip",
+                    timeout=timeout,
+                )
 
             if response.status_code == 200:
                 logger.info(f"✅ Прокси {host}:{port} работает")
                 return "working"
-            else:
-                logger.warning(
-                    f"❌ Прокси {host}:{port} вернул статус {response.status_code}"
-                )
-                return "failed"
 
-    except httpx.TimeoutException:
-        logger.warning(f"⏱️ Таймаут при проверке прокси {host}:{port}")
-        return "failed"
-    except httpx.ProxyError as e:
-        logger.warning(f"❌ Ошибка прокси {host}:{port}: {e}")
-        return "failed"
-    except Exception as e:
-        logger.error(f"❌ Ошибка при проверке прокси {host}:{port}: {e}")
-        return "failed"
+            logger.warning(
+                f"❌ Прокси {host}:{port} вернул статус {response.status_code} (попытка {attempt + 1})"
+            )
+        except httpx.TimeoutException:
+            logger.warning(
+                f"⏱️ Таймаут при проверке прокси {host}:{port} (попытка {attempt + 1})"
+            )
+        except httpx.ProxyError as e:
+            logger.warning(
+                f"❌ Ошибка прокси {host}:{port}: {e} (попытка {attempt + 1})"
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Ошибка при проверке прокси {host}:{port}: {e} (попытка {attempt + 1})"
+            )
+
+    return "failed"
 
 
 async def check_user_proxy(telegram_id: int, bot=None) -> Optional[str]:
