@@ -9,6 +9,8 @@
 
 import asyncio
 import logging
+import time
+from pathlib import Path
 
 # Импортируем административный роутер
 from admin import admin_router
@@ -28,7 +30,8 @@ from config import settings
 from database import get_user, init_database, update_proxy_status
 from dotenv import load_dotenv
 from help_text import HELP_TEXT, HELP_TEXT_CN, HELP_TEXT_ENG
-from logger_config import setup_root_logger
+from log_utils import send_admin_with_latest_log
+from logger_config import set_admin_alert_callback, setup_root_logger
 from market_router import market_router
 from orders_dialog import OrdersSG, orders_dialog
 from predict_api import PredictAPIClient, get_chain_id, get_usdt_balance
@@ -371,10 +374,42 @@ async def background_sync_task():
 
     # Интервал синхронизации: 60 секунд (1 минута)
     SYNC_INTERVAL = 60
+    # Максимальное время выполнения синхронизации (3 минуты)
+    MAX_SYNC_DURATION = 180
+
+    # Определяем директорию логов
+    logs_dir = Path(__file__).parent.parent / "logs"
 
     while True:
         try:
+            # Засекаем время начала синхронизации
+            sync_start_time = time.time()
+
             await async_sync_all_orders(bot)
+
+            # Засекаем время окончания и вычисляем длительность
+            sync_end_time = time.time()
+            sync_duration = sync_end_time - sync_start_time
+
+            # Проверяем, не превысила ли синхронизация максимальное время
+            if sync_duration > MAX_SYNC_DURATION:
+                logger.warning(
+                    f"Синхронизация ордеров заняла {sync_duration:.2f} секунд "
+                    f"({sync_duration / 60:.2f} минут), что превышает лимит в {MAX_SYNC_DURATION} секунд"
+                )
+
+                # Отправляем уведомление администратору
+                if settings.admin_telegram_id and settings.admin_telegram_id != 0:
+                    message = (
+                        f"⚠️ <b>Sync orders took too long</b>\n\n"
+                        f"<b>Duration:</b> {sync_duration:.2f} seconds ({sync_duration / 60:.2f} minutes)\n"
+                        f"<b>Limit:</b> {MAX_SYNC_DURATION} seconds (3 minutes)\n\n"
+                        f"The sync_orders.py task exceeded the time limit."
+                    )
+                    await send_admin_with_latest_log(
+                        bot, settings.admin_telegram_id, message, logs_dir
+                    )
+
         except Exception as e:
             logger.error(f"Error in background sync task: {e}")
 
@@ -405,6 +440,19 @@ async def main():
 
     # Инициализируем базу данных
     await init_database()
+
+    # Настраиваем обработчик уведомлений администратора
+    if settings.admin_telegram_id and settings.admin_telegram_id != 0:
+        logs_dir = Path(__file__).parent.parent / "logs"
+
+        async def admin_alert_callback(message: str) -> None:
+            """Функция обратного вызова для отправки уведомлений администратору."""
+            await send_admin_with_latest_log(
+                bot, settings.admin_telegram_id, message, logs_dir
+            )
+
+        set_admin_alert_callback(admin_alert_callback)
+        logger.info("Admin alert handler configured")
 
     # Регистрируем middleware для антиспама (глобально)
     dp.message.middleware(AntiSpamMiddleware(bot=bot))

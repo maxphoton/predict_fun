@@ -8,6 +8,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from aiogram import Router
@@ -427,12 +428,15 @@ Use the /support command to contact administrator."""
         error_str = str(e)
         error_hash = hashlib.md5(error_str.encode()).hexdigest()[:8].upper()
         error_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        escaped_error = escape(error_str)
 
         await message.answer(
             f"""❌ Registration failed: Could not connect to API.
 
 Error code: <code>{error_hash}</code>
 Time: {error_time}
+
+<b>Error:</b> <code>{escaped_error}</code>
 
 Please check the correctness of the entered data and try again with /start command.
 

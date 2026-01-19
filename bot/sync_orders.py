@@ -117,6 +117,7 @@ ARCHITECTURE:
 """
 
 import asyncio
+import logging
 import time
 import traceback
 from typing import Dict, List, Optional, Tuple
@@ -129,14 +130,13 @@ from database import (
     update_order_in_db,
     update_order_status,
 )
-from logger_config import setup_logger
 from predict_api import PredictAPIClient
 from predict_api.auth import get_chain_id
 from predict_api.sdk_operations import calculate_new_target_price, place_single_order
 from predict_sdk import OrderBuilder, OrderBuilderOptions, Side
 
-# Настройка логирования
-logger = setup_logger("sync_orders", "sync_orders.log")
+# Настройка логирования - используем корневой логгер (единый файл bot.log)
+logger = logging.getLogger(__name__)
 
 # Константы статусов для нового API (соответствуют статусам в API)
 ORDER_STATUS_OPEN = "OPEN"

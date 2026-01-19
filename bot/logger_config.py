@@ -2,17 +2,25 @@
 Модуль для настройки логирования в приложении.
 
 Предоставляет функцию setup_root_logger для настройки корневого логгера
-и setup_logger для создания отдельных логгеров (например, для sync_orders).
+с ротацией логов и поддержкой уведомлений администратора.
 """
 
+import asyncio
 import logging
+import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
+
+# Глобальная переменная для хранения функции отправки уведомлений админу
+_admin_alert_callback = None
+_last_alert_time = 0
+_alert_cooldown = 300  # 5 минут между уведомлениями
 
 
 def _create_handlers(
     log_file: Path, file_level: int = logging.INFO, console_level: int = logging.WARNING
-) -> tuple[logging.FileHandler, logging.StreamHandler]:
+) -> tuple[RotatingFileHandler, logging.StreamHandler]:
     """
     Создает обработчики для файла и консоли с разными уровнями логирования.
 
@@ -34,9 +42,17 @@ def _create_handlers(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    # Обработчик для записи в файл (режим append - добавляет в конец, не затирает)
+    # Обработчик для записи в файл с ротацией (7 MB, 5 файлов)
     # В файл пишем все логи (INFO и выше)
-    file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    max_bytes = 7 * 1024 * 1024  # 7 MB
+    backup_count = 5  # Храним 5 ротированных файлов
+    file_handler = RotatingFileHandler(
+        log_file,
+        mode="a",
+        encoding="utf-8",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+    )
     file_handler.setLevel(file_level)
     file_handler.setFormatter(file_format)
 
@@ -49,6 +65,44 @@ def _create_handlers(
     return file_handler, console_handler
 
 
+class AdminAlertHandler(logging.Handler):
+    """Обработчик логирования для отправки уведомлений администратору при ошибках."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Отправляет уведомление администратору при ошибках."""
+        global _admin_alert_callback, _last_alert_time, _alert_cooldown
+
+        # Отправляем уведомления только для ERROR и выше
+        if record.levelno < logging.ERROR:
+            return
+
+        # Проверяем cooldown, чтобы не спамить уведомлениями
+        current_time = time.time()
+        if current_time - _last_alert_time < _alert_cooldown:
+            return
+
+        # Проверяем, есть ли функция для отправки уведомлений
+        if _admin_alert_callback is None:
+            return
+
+        # Обновляем время последнего уведомления
+        _last_alert_time = current_time
+
+        # Формируем сообщение об ошибке
+        error_message = "🚨 <b>Error in log</b>\n\n"
+        error_message += f"<b>Level:</b> {record.levelname}\n"
+        error_message += f"<b>Module:</b> {record.name}\n"
+        error_message += f"<b>Message:</b> {record.getMessage()}\n"
+
+        # Пытаемся отправить уведомление асинхронно
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_admin_alert_callback(error_message))
+        except RuntimeError:
+            # Если нет запущенного event loop, просто логируем
+            pass
+
+
 def setup_root_logger(
     log_filename: str = "bot.log",
     file_level: int = logging.INFO,
@@ -59,7 +113,7 @@ def setup_root_logger(
     Настраивает корневой логгер для всех модулей.
 
     Все модули, использующие logging.getLogger(__name__), автоматически
-    будут логировать через корневой логгер в указанный файл.
+    будут логировать через корневой логгер в указанный файл с ротацией.
 
     Args:
         log_filename: Имя файла для логов (по умолчанию "bot.log")
@@ -98,60 +152,18 @@ def setup_root_logger(
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
 
+    # Добавляем обработчик для уведомлений администратора (будет настроен позже)
+    admin_handler = AdminAlertHandler()
+    admin_handler.setLevel(logging.ERROR)
+    root_logger.addHandler(admin_handler)
 
-def setup_logger(
-    logger_name: str,
-    log_filename: str,
-    file_level: int = logging.INFO,
-    console_level: int = logging.WARNING,
-    logs_dir: Optional[Path] = None,
-) -> logging.Logger:
+
+def set_admin_alert_callback(callback):
     """
-    Настраивает отдельный логгер с записью в свой файл (например, для sync_orders).
-
-    Используется для модулей, которым нужен отдельный файл логов.
-    Для обычных модулей используйте setup_root_logger() и logging.getLogger(__name__).
+    Устанавливает функцию обратного вызова для отправки уведомлений администратору.
 
     Args:
-        logger_name: Имя логгера (например, "sync_orders")
-        log_filename: Имя файла для логов (например, "sync_orders.log")
-        file_level: Уровень логирования для файла (по умолчанию INFO - все логи)
-        console_level: Уровень логирования для консоли (по умолчанию WARNING - только важные)
-        logs_dir: Директория для логов. Если не указана, используется logs/ в корне проекта
-
-    Returns:
-        Настроенный логгер
-
-    Example:
-        >>> logger = setup_logger("sync_orders", "sync_orders.log")
-        >>> logger.info("Sync started")  # Попадет только в файл
-        >>> logger.warning("Warning")  # Попадет и в файл, и в консоль
+        callback: Асинхронная функция, принимающая сообщение и отправляющая его админу
     """
-    # Определяем директорию для логов
-    if logs_dir is None:
-        logs_dir = Path(__file__).parent.parent / "logs"
-
-    # Создаем папку logs, если её нет
-    logs_dir.mkdir(exist_ok=True)
-
-    # Получаем или создаем конкретный логгер
-    logger = logging.getLogger(logger_name)
-    # Устанавливаем минимальный уровень, чтобы все логи проходили
-    logger.setLevel(min(file_level, console_level))
-
-    # Удаляем существующие обработчики, чтобы не дублировать логи
-    logger.handlers.clear()
-
-    # Создаем обработчики для конкретного логгера с разными уровнями
-    log_file = logs_dir / log_filename
-    file_handler, console_handler = _create_handlers(
-        log_file, file_level, console_level
-    )
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
-    # Предотвращаем распространение логов на корневой логгер
-    # Это нужно, чтобы логи из конкретного логгера не дублировались в корневом
-    logger.propagate = False
-
-    return logger
+    global _admin_alert_callback
+    _admin_alert_callback = callback
