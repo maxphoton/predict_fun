@@ -9,7 +9,6 @@
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 
 # Импортируем административный роутер
@@ -374,42 +373,28 @@ async def background_sync_task():
 
     # Интервал синхронизации: 60 секунд (1 минута)
     SYNC_INTERVAL = 60
-    # Максимальное время выполнения синхронизации (3 минуты)
-    MAX_SYNC_DURATION = 180
+    # Таймаут для цикла синхронизации (секунды)
+    SYNC_TIMEOUT = 180
 
     # Определяем директорию логов
     logs_dir = Path(__file__).parent.parent / "logs"
 
     while True:
         try:
-            # Засекаем время начала синхронизации
-            sync_start_time = time.time()
-
-            await async_sync_all_orders(bot)
-
-            # Засекаем время окончания и вычисляем длительность
-            sync_end_time = time.time()
-            sync_duration = sync_end_time - sync_start_time
-
-            # Проверяем, не превысила ли синхронизация максимальное время
-            if sync_duration > MAX_SYNC_DURATION:
-                logger.warning(
-                    f"Синхронизация ордеров заняла {sync_duration:.2f} секунд "
-                    f"({sync_duration / 60:.2f} минут), что превышает лимит в {MAX_SYNC_DURATION} секунд"
+            await asyncio.wait_for(async_sync_all_orders(bot), timeout=SYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Sync cycle timeout exceeded ({SYNC_TIMEOUT}s). Sending notification to admin."
+            )
+            if settings.admin_telegram_id and settings.admin_telegram_id != 0:
+                timeout_message = (
+                    "🚨 <b>Sync Cycle Timeout</b>\n\n"
+                    f"Order sync exceeded {SYNC_TIMEOUT} seconds.\n"
+                    "The task will continue in the next cycle."
                 )
-
-                # Отправляем уведомление администратору
-                if settings.admin_telegram_id and settings.admin_telegram_id != 0:
-                    message = (
-                        f"⚠️ <b>Sync orders took too long</b>\n\n"
-                        f"<b>Duration:</b> {sync_duration:.2f} seconds ({sync_duration / 60:.2f} minutes)\n"
-                        f"<b>Limit:</b> {MAX_SYNC_DURATION} seconds (3 minutes)\n\n"
-                        f"The sync_orders.py task exceeded the time limit."
-                    )
-                    await send_admin_with_latest_log(
-                        bot, settings.admin_telegram_id, message, logs_dir
-                    )
-
+                await send_admin_with_latest_log(
+                    bot, settings.admin_telegram_id, timeout_message, logs_dir
+                )
         except Exception as e:
             logger.error(f"Error in background sync task: {e}")
 
