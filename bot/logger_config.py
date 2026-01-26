@@ -16,6 +16,7 @@ from typing import Optional
 _admin_alert_callback = None
 _last_alert_time = 0
 _alert_cooldown = 300  # 5 минут между уведомлениями
+_alert_ignore_patterns = ("Tunnel connection failed: 410 Gone",)
 
 
 def _create_handlers(
@@ -85,6 +86,10 @@ class AdminAlertHandler(logging.Handler):
         if _admin_alert_callback is None:
             return
 
+        message = record.getMessage()
+        if any(pattern in message for pattern in _alert_ignore_patterns):
+            return
+
         # Обновляем время последнего уведомления
         _last_alert_time = current_time
 
@@ -92,7 +97,7 @@ class AdminAlertHandler(logging.Handler):
         error_message = "🚨 <b>Error in log</b>\n\n"
         error_message += f"<b>Level:</b> {record.levelname}\n"
         error_message += f"<b>Module:</b> {record.name}\n"
-        error_message += f"<b>Message:</b> {record.getMessage()}\n"
+        error_message += f"<b>Message:</b> {message}\n"
 
         # Пытаемся отправить уведомление асинхронно
         try:

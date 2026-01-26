@@ -4,6 +4,7 @@
 Предоставляет функции для поиска последнего файла логов и отправки уведомлений администратору.
 """
 
+import html
 import logging
 from pathlib import Path
 from typing import Optional
@@ -64,7 +65,8 @@ async def send_admin_with_latest_log(
 
     try:
         # Отправляем текстовое сообщение
-        await bot.send_message(chat_id=admin_id, text=message, parse_mode="HTML")
+        safe_message = html.escape(message)
+        await bot.send_message(chat_id=admin_id, text=safe_message, parse_mode="HTML")
         logger.info(f"Отправлено уведомление администратору {admin_id}")
 
         # Находим последний файл лога

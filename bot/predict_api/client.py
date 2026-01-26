@@ -11,10 +11,16 @@ from typing import Dict, List, Optional
 
 import requests
 from proxy_checker import parse_proxy_for_requests
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ProxyError, RequestException, Timeout
 
 from .auth import get_api_base_url, refresh_jwt_token_if_needed
 
 logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_RETRY_ATTEMPTS = 2
+RETRYABLE_STATUS_CODES = {502, 503, 504}
 
 
 class PredictAPIClient:
@@ -74,6 +80,12 @@ class PredictAPIClient:
         self.jwt_token = self._session.get("jwt_token")
 
         if not self.jwt_token:
+            error_detail = self._session.get("jwt_last_error")
+            if error_detail:
+                raise ValueError(
+                    "JWT токен не получен. Проверьте аутентификацию. "
+                    f"Причина: {error_detail}"
+                )
             raise ValueError("JWT токен не получен. Проверьте аутентификацию.")
 
         return {
@@ -119,56 +131,97 @@ class PredictAPIClient:
                     "x-api-key": self.api_key,
                 }
 
-            # Выполняем запрос в отдельном потоке
-            def _make_request_sync():
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    json=json_data,
-                    timeout=30,
-                    proxies=self.proxies,
-                )
-                return response
-
-            response = await asyncio.to_thread(_make_request_sync)
-
-            # Если получили 401, пробуем обновить токен и повторить запрос (только если требуется JWT)
-            if response.status_code == 401 and retry_on_401 and require_jwt:
-                logger.warning("Получен 401, обновляем JWT токен и повторяем запрос")
-                headers = await self._get_headers(force_refresh=True)
-
-                def _retry_request_sync():
-                    return requests.request(
+            for attempt in range(REQUEST_RETRY_ATTEMPTS):
+                # Выполняем запрос в отдельном потоке
+                def _make_request_sync():
+                    response = requests.request(
                         method=method,
                         url=url,
                         headers=headers,
                         params=params,
                         json=json_data,
-                        timeout=30,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
                         proxies=self.proxies,
                     )
+                    return response
 
-                response = await asyncio.to_thread(_retry_request_sync)
-
-            # Парсим JSON ответ (всегда, независимо от статус-кода)
-            try:
-                data = response.json()
-                # Если статус не успешный, логируем ошибку, но возвращаем данные
-                if response.status_code not in (200, 201):
-                    logger.error(
-                        f"Ошибка API запроса {method} {url}: "
-                        f"status={response.status_code}, response={response.text}"
+                try:
+                    response = await asyncio.to_thread(_make_request_sync)
+                except Timeout as e:
+                    logger.warning(
+                        f"Таймаут API запроса {method} {url}: {e} "
+                        f"(attempt {attempt + 1}/{REQUEST_RETRY_ATTEMPTS})"
                     )
-                return data
-            except ValueError as e:
-                # Если не JSON, логируем и возвращаем None
-                logger.error(
-                    f"Ошибка парсинга JSON ответа {method} {url}: {e}. "
-                    f"Status={response.status_code}, response={response.text}"
-                )
-                return None
+                    if attempt < REQUEST_RETRY_ATTEMPTS - 1 and method.upper() == "GET":
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    return None
+                except ProxyError as e:
+                    logger.error(f"Ошибка прокси при API запросе {method} {url}: {e}")
+                    return None
+                except RequestsConnectionError as e:
+                    logger.warning(
+                        f"Ошибка соединения при API запросе {method} {url}: {e} "
+                        f"(attempt {attempt + 1}/{REQUEST_RETRY_ATTEMPTS})"
+                    )
+                    if attempt < REQUEST_RETRY_ATTEMPTS - 1 and method.upper() == "GET":
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    return None
+                except RequestException as e:
+                    logger.error(f"Ошибка сети при API запросе {method} {url}: {e}")
+                    return None
+
+                # Если получили 401, пробуем обновить токен и повторить запрос (только если требуется JWT)
+                if response.status_code == 401 and retry_on_401 and require_jwt:
+                    logger.warning(
+                        "Получен 401, обновляем JWT токен и повторяем запрос"
+                    )
+                    headers = await self._get_headers(force_refresh=True)
+
+                    def _retry_request_sync():
+                        return requests.request(
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            params=params,
+                            json=json_data,
+                            timeout=REQUEST_TIMEOUT_SECONDS,
+                            proxies=self.proxies,
+                        )
+
+                    response = await asyncio.to_thread(_retry_request_sync)
+
+                if (
+                    response.status_code in RETRYABLE_STATUS_CODES
+                    and method.upper() == "GET"
+                    and attempt < REQUEST_RETRY_ATTEMPTS - 1
+                ):
+                    logger.warning(
+                        "Временная ошибка API "
+                        f"(status={response.status_code}) для {method} {url}, "
+                        f"повторяем (attempt {attempt + 1}/{REQUEST_RETRY_ATTEMPTS})"
+                    )
+                    await asyncio.sleep(2**attempt)
+                    continue
+
+                # Парсим JSON ответ (всегда, независимо от статус-кода)
+                try:
+                    data = response.json()
+                    # Если статус не успешный, логируем ошибку, но возвращаем данные
+                    if response.status_code not in (200, 201):
+                        logger.error(
+                            f"Ошибка API запроса {method} {url}: "
+                            f"status={response.status_code}, response={response.text}"
+                        )
+                    return data
+                except ValueError as e:
+                    # Если не JSON, логируем и возвращаем None
+                    logger.error(
+                        f"Ошибка парсинга JSON ответа {method} {url}: {e}. "
+                        f"Status={response.status_code}, response={response.text}"
+                    )
+                    return None
 
         except Exception as e:
             logger.error(
