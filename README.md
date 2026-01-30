@@ -108,6 +108,8 @@ A Telegram bot for placing limit orders on [predict.fun](https://predict.fun/) p
 - **Referral Code**: Command `/set_ref_code` allows setting a 5-character referral code (one-time setup)
 
 ### 🔐 Proxy Management
+UPD 30/01/2026: Proxy was disabled
+
 - **Proxy Configuration**: Proxy is required during registration and can be updated later via `/set_proxy` command
 - **Format Validation**: Proxy format is validated (ip:port:login:password)
 - **Health Checking**: Proxy connection is tested before saving using HTTP requests

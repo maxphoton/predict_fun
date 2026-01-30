@@ -1376,7 +1376,6 @@ async def process_cancel(callback: CallbackQuery, state: FSMContext):
 Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
-Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
     )

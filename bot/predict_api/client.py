@@ -10,7 +10,6 @@ import logging
 from typing import Dict, List, Optional
 
 import requests
-from proxy_checker import parse_proxy_for_requests
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ProxyError, RequestException, Timeout
 
@@ -53,7 +52,8 @@ class PredictAPIClient:
         self.jwt_token: Optional[str] = None
 
         # Парсим прокси для использования в requests
-        self.proxies = parse_proxy_for_requests(proxy_str)
+        # self.proxies = parse_proxy_for_requests(proxy_str)
+        self.proxies = None
 
         # Внутренняя сессия для управления токеном
         # Храним уже парсенную версию прокси для передачи в auth функции

@@ -28,7 +28,6 @@ from predict_api import PredictAPIClient
 from predict_api.auth import get_chain_id
 from predict_api.sdk_operations import get_usdt_balance
 from predict_sdk import OrderBuilder, OrderBuilderOptions
-from proxy_checker import check_proxy_health, validate_proxy_format
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,6 @@ class RegistrationStates(StatesGroup):
     waiting_wallet = State()
     waiting_private_key = State()
     waiting_api_key = State()
-    waiting_proxy = State()
 
 
 # ============================================================================
@@ -69,7 +67,6 @@ async def cmd_start(message: Message, state: FSMContext):
 Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
-Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
         )
@@ -256,44 +253,6 @@ Please enter a different API key:"""
     except Exception:
         pass
 
-    # Переходим к шагу прокси
-    await message.answer(
-        """🔐 Please enter your proxy server for secure connection to Predict.
-
-Proxy format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-    )
-    await state.set_state(RegistrationStates.waiting_proxy)
-
-
-@start_router.message(RegistrationStates.waiting_proxy)
-async def process_proxy(message: Message, state: FSMContext):
-    """Handles proxy input and performs all checks before completing registration."""
-    # Валидируем формат прокси
-    if not message.text:
-        await message.answer(
-            """❌ Please enter your proxy server.
-
-Proxy format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-        )
-        return
-
-    proxy_input = message.text.strip()
-    is_valid, error_message = validate_proxy_format(proxy_input)
-
-    if not is_valid:
-        await message.answer(
-            f"""❌ Invalid proxy format: {error_message}
-
-Please enter proxy in format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-        )
-        return
-
     # Получаем данные из state
     data = await state.get_data()
     telegram_id = message.from_user.id
@@ -309,45 +268,15 @@ Example: 192.168.1.1:8080:user:pass"""
         await state.clear()
         return
 
-    # Проверяем прокси
-    await message.answer("""🔍 Checking proxy connection...""")
-
-    try:
-        proxy_status = await check_proxy_health(proxy_input)
-        if proxy_status != "working":
-            await message.answer(
-                """❌ Proxy check failed. The proxy is not working.
-
-Please enter a valid proxy server.
-
-Proxy format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-            )
-            return
-    except Exception as e:
-        logger.error(f"Ошибка проверки прокси для пользователя {telegram_id}: {e}")
-        await message.answer(
-            """❌ Error checking proxy.
-
-Please enter a valid proxy server.
-
-Proxy format: ip:port:login:password
-
-Example: 192.168.1.1:8080:user:pass"""
-        )
-        return
-
-    # Прокси проверен успешно, теперь проверяем API подключение
+    # проверяем API подключение
     await message.answer("""🔍 Verifying connection to API...""")
 
     try:
-        # Создаем API клиент нового API (используем прокси, который только что проверили)
+        # Создаем API клиент нового API
         PredictAPIClient(
             api_key=api_key_clean,
             wallet_address=wallet_address,
             private_key=private_key,
-            proxy_str=proxy_input,
         )
 
         # Создаем OrderBuilder для SDK операций
@@ -397,15 +326,7 @@ Please start registration again with /start using a valid invite code."""
             wallet_address=wallet_address,
             private_key=private_key,
             api_key=api_key_clean,
-            proxy_str=proxy_input,
-            proxy_status=proxy_status,
         )
-
-        # Удаляем сообщение пользователя с прокси
-        try:
-            await message.delete()
-        except Exception:
-            pass
 
         await state.clear()
         await message.answer(
@@ -418,7 +339,6 @@ Your data has been encrypted and verified.
 Use the /make_market command to place an order.
 Use the /orders command to manage your orders.
 Use the /check_account command to check your balance and account statistics.
-Use the /set_proxy command to configure proxy server.
 Use the /help command to view instructions.
 Use the /support command to contact administrator."""
         )
